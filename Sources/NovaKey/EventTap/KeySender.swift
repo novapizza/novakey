@@ -36,15 +36,28 @@ final class KeySender {
             execute(result: .replace(backspaces: backspaces, text: text), proxy: proxy)
 
         case .replace(let backspaces, let text):
-            // Browser fix: send an invisible character first to break autocomplete
-            if fixBrowserAutocomplete && backspaces > 0 {
-                sendEmptyCharacter(proxy: proxy)
-                sendBackspaces(count: 1, proxy: proxy)
-            }
-
-            // Send backspaces to delete old characters
+            // Send backspaces to delete old characters.
+            // Inline autocomplete (browser URL bars, Spotlight) keeps its
+            // suggested suffix as selected text, and the first backspace only
+            // clears that selection instead of deleting a typed character
+            // ("dd" -> "dđ" instead of "đ"). Probe the focused element's
+            // selection to compensate exactly.
             if backspaces > 0 {
-                sendBackspaces(count: backspaces, proxy: proxy)
+                var count = backspaces
+                if fixBrowserAutocomplete {
+                    if let selectionLength = focusedSelectionLength() {
+                        if selectionLength > 0 {
+                            count += 1
+                            Log.debug("Autocomplete selection of \(selectionLength) chars; sending \(count) backspaces")
+                        }
+                    } else {
+                        // Focused element doesn't answer accessibility queries;
+                        // fall back to the invisible-character trick.
+                        sendEmptyCharacter(proxy: proxy)
+                        count += 1
+                    }
+                }
+                sendBackspaces(count: count, proxy: proxy)
             }
 
             // Send replacement text
@@ -144,6 +157,47 @@ final class KeySender {
     }
 
     // MARK: - Browser Fix
+
+    /// System-wide accessibility element, used to locate the focused text field.
+    /// The short messaging timeout keeps the event-tap callback fast even when
+    /// the focused app is slow to answer AX queries.
+    private lazy var systemWideElement: AXUIElement = {
+        let element = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(element, 0.05)
+        return element
+    }()
+
+    /// Length of the selected text in the currently focused UI element,
+    /// or nil if the element can't be queried via accessibility.
+    ///
+    /// A non-zero selection at replacement time means inline autocomplete is
+    /// showing (the engine resets its session on clicks and non-letter keys,
+    /// so a user-made selection can't survive into a replacement).
+    private func focusedSelectionLength() -> Int? {
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(systemWideElement,
+                                            kAXFocusedUIElementAttribute as CFString,
+                                            &focusedRef) == .success,
+              let focused = focusedRef,
+              CFGetTypeID(focused) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        let element = focused as! AXUIElement
+
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element,
+                                            kAXSelectedTextRangeAttribute as CFString,
+                                            &rangeRef) == .success,
+              let rangeValue = rangeRef,
+              CFGetTypeID(rangeValue) == AXValueGetTypeID() else {
+            return nil
+        }
+        var range = CFRange()
+        guard AXValueGetValue((rangeValue as! AXValue), .cfRange, &range) else {
+            return nil
+        }
+        return range.length
+    }
 
     /// Send a narrow no-break space (U+202F) to defeat browser URL bar autocomplete
     /// that interferes with the backspace technique.
