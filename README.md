@@ -11,8 +11,10 @@ Fast, lightweight (228KB), compatible with browsers, terminals, and all macOS ap
 - **Telex input method** with full support for tones (s/f/r/x/j/z) and modifiers (aa/ee/oo/aw/ow/uw/dd)
 - **Backspace technique** -- uses CGEvent tap instead of IMKit, so it works in browser URL bars, Terminal, VS Code, Spotlight, and everywhere else
 - **Smart tone placement** -- modern Vietnamese orthographic rules (e.g., `hoang` + `f` places tone on `a`, not `o`)
+- **English-word protection** -- Telex transforms are gated on structural syllable validity, so `class`, `know`, and `add` stay literal instead of turning into Vietnamese
+- **Double-press escape / n+1 typing** -- typing a Telex key twice trusts the second press unconditionally, so `disst` → `dist`, `noww` → `now`, `corrrection` → `correction`
 - **Menu bar app** -- runs as a status bar icon (V/E), no dock icon
-- **Browser autocomplete fix** -- sends invisible character before backspaces to prevent URL bar interference
+- **Browser autocomplete fix** -- probes the focused field's selection to compensate for inline URL-bar suggestions, avoiding backspace miscounts
 - **Sleep/wake recovery** -- automatically restarts event tap after system sleep
 - **Option+Z** to toggle Vietnamese/English mode
 
@@ -138,13 +140,15 @@ swiftc -o /tmp/novakey_tests \
   -parse-as-library && /tmp/novakey_tests
 ```
 
-38 tests covering:
+87 tests covering:
 - All tone marks (sắc, huyền, hỏi, ngã, nặng, remove)
 - All vowel modifiers (circumflex, breve, horn)
 - D-stroke, combined sequences
 - Smart tone placement rules
 - Syllable buffer operations
 - Word break and modifier key handling
+- English-word protection and spelling restore
+- Double-press escape / n+1 typing
 
 ## Debug
 

@@ -9,8 +9,10 @@ Nhanh, nhẹ (228KB), tương thích với trình duyệt, terminal và mọi �
 - **Kiểu gõ Telex** hỗ trợ đầy đủ dấu thanh (s/f/r/x/j/z) và biến đổi nguyên âm (aa/ee/oo/aw/ow/uw/dd)
 - **Kỹ thuật backspace** -- sử dụng CGEvent tap thay vì IMKit, hoạt động được trên thanh địa chỉ trình duyệt, Terminal, VS Code, Spotlight và mọi nơi
 - **Đặt dấu thông minh** -- theo quy tắc chính tả tiếng Việt hiện đại (ví dụ: `hoang` + `f` đặt dấu trên `a`, không phải `o`)
+- **Bảo vệ từ tiếng Anh** -- các biến đổi Telex chỉ áp dụng khi âm tiết hợp lệ về cấu trúc, nên `class`, `know`, `add` giữ nguyên thay vì bị biến thành tiếng Việt
+- **Nhấn đúp escape / gõ n+1** -- gõ một phím Telex hai lần sẽ tin tưởng lần nhấn thứ hai vô điều kiện, nên `disst` → `dist`, `noww` → `now`, `corrrection` → `correction`
 - **Ứng dụng thanh menu** -- chạy dưới dạng biểu tượng trên thanh trạng thái (V/E), không hiện trên Dock
-- **Sửa lỗi autocomplete trình duyệt** -- gửi ký tự ẩn trước khi xóa để tránh xung đột với thanh địa chỉ
+- **Sửa lỗi autocomplete trình duyệt** -- dò vùng chọn của ô nhập đang focus để bù cho gợi ý nội tuyến ở thanh địa chỉ, tránh đếm sai số backspace
 - **Tự phục hồi sau sleep/wake** -- tự động khởi động lại event tap sau khi máy ngủ
 - **Option+Z** để chuyển đổi giữa chế độ Việt/Anh
 
@@ -136,13 +138,15 @@ swiftc -o /tmp/novakey_tests \
   -parse-as-library && /tmp/novakey_tests
 ```
 
-38 test bao gồm:
+87 test bao gồm:
 - Tất cả dấu thanh (sắc, huyền, hỏi, ngã, nặng, xóa dấu)
 - Tất cả biến đổi nguyên âm (mũ, trăng, móc)
 - Đ ngang, chuỗi kết hợp
 - Quy tắc đặt dấu thông minh
 - Các thao tác trên bộ đệm âm tiết
 - Xử lý phím ngắt từ và phím bổ trợ
+- Bảo vệ từ tiếng Anh và phục hồi chính tả
+- Nhấn đúp escape / gõ n+1
 
 ## Gỡ lỗi
 
