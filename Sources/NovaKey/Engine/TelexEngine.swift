@@ -226,6 +226,12 @@ final class TelexEngine {
             return undoTone(key, isUpperCase: isUpperCase)
         }
 
+        // Only reinterpret the key as a tone mark when the current syllable
+        // is structurally valid Vietnamese. Otherwise English words trigger
+        // spurious tones ("class" -> "clás") and an undone tone re-applies
+        // on the next press ("cor" + r -> "cỏr" -> "corr" oscillation).
+        guard SpellingChecker.isValidSyllable(buffer) else { return nil }
+
         // Find the correct position for the tone mark
         guard let position = TonePlacement.findTonePosition(in: buffer) else {
             return nil
@@ -276,10 +282,12 @@ final class TelexEngine {
     /// convert to đ. Otherwise, add as regular 'd'.
     private func handleDKey(isUpperCase: Bool) -> EngineResult {
         // Only trigger dd -> đ when the 'd' is immediately adjacent (the last
-        // char in the buffer). Matching any earlier 'd' in the syllable would
-        // wrongly convert cases like "disabled" where the leading 'd' is
-        // several chars behind the current one.
-        if let last = buffer.chars.last, last.base == "d", !last.hasDStroke {
+        // char in the buffer) AND is the sole character so far: đ only occurs
+        // syllable-initially in Vietnamese. Matching a 'd' later in the
+        // syllable would wrongly convert English words like "add" or
+        // "disabled".
+        if let last = buffer.chars.last, last.base == "d", !last.hasDStroke,
+           buffer.count == 1 {
             // Double d -> đ
             let oldText = buffer.text
             buffer.applyDStroke(at: buffer.count - 1)
@@ -337,6 +345,7 @@ final class TelexEngine {
         // Without this, the "aw -> ă" rule fires first and gives "uă" instead.
         // Same guard as the "uo" propagation: skip if u is part of "qu" cluster.
         if key == "w",
+           SpellingChecker.isValidSyllable(buffer),
            let aIdx = buffer.lastIndex(ofBase: "a"),
            aIdx > 0,
            buffer.chars[aIdx].modifier == .none {
@@ -362,8 +371,12 @@ final class TelexEngine {
                         return undoVowelModifier(key, targetIndex: targetIdx, isUpperCase: isUpperCase)
                     }
 
-                    // If no modifier yet -> apply
+                    // If no modifier yet -> apply, but only when the current
+                    // syllable is structurally valid Vietnamese. This keeps
+                    // English words literal ("know" stays "know", the "kno"
+                    // initial is invalid so 'w' never becomes a horn).
                     if currentMod == .none {
+                        guard SpellingChecker.isValidSyllable(buffer) else { return nil }
                         let oldText = buffer.text
                         buffer.applyModifier(rule.modifier, at: targetIdx)
                         // "uo" + w -> "ươ": when horn is applied to an 'o'
@@ -386,8 +399,12 @@ final class TelexEngine {
             }
         }
 
-        // Standalone 'w' -> 'ư' when there's no target vowel to modify
-        if key == "w" && buffer.isEmpty {
+        // Standalone 'w' -> 'ư' when there's no target vowel to modify.
+        // Also allowed right after a syllable-initial đ ("ddw" -> "đư", so
+        // "ddwowngf" -> "đường"). đ never occurs in English words, so this
+        // cannot misfire -- unlike a general consonant+w rule, which would
+        // wreck words like "swift".
+        if key == "w" && (buffer.isEmpty || (buffer.hasDStroke && buffer.vowelCount == 0)) {
             let viChar = ViChar(base: "u", modifier: .horn, isUpperCase: isUpperCase)
             buffer.append(viChar)
             // Replace the 'w' keystroke with 'ư'
@@ -426,26 +443,36 @@ final class TelexEngine {
 
     // MARK: - Spelling Restore
 
-    /// If the current buffer carries Telex transformations (tone, modifier,
-    /// or d-stroke) but does not form a structurally valid Vietnamese syllable,
-    /// return a restore result that replaces the composed text with the raw
-    /// keystrokes the user originally typed. Returns nil when no restore is
-    /// needed.
+    /// If the composed text diverged from the raw keystrokes and does not
+    /// form a structurally valid Vietnamese syllable, return a restore result
+    /// that replaces the composed text with the raw keystrokes the user
+    /// originally typed. Returns nil when no restore is needed.
     private func restoreIfInvalid() -> EngineResult? {
         guard !buffer.isEmpty else { return nil }
         guard !rawKeystrokes.isEmpty else { return nil }
 
-        // Only restore when the buffer actually contains a Telex transformation;
-        // otherwise the user just typed plain letters that we should leave alone.
+        // Only restore when a tone or vowel-modifier transformation is still
+        // visible in the buffer.
+        //
+        // A double-press undo is always trusted as deliberate: the composed
+        // text is what the user wants ("disst" -> "dist", "noww" -> "now"),
+        // so consumed keys are never resurrected from the raw record. The
+        // cost is that typing an English double letter without the extra
+        // escape press composes one letter short ("correction" with two r's
+        // -> "corection") -- same tradeoff as Unikey without a dictionary.
+        //
+        // đ deliberately does NOT count: dd -> đ only fires syllable-
+        // initially, so it can't happen by accident, and a vowel-less "đ"
+        // is legitimate on its own (currency "50.000đ", shorthand "đc").
         let hasTransformation = buffer.chars.contains {
-            $0.modifier != .none || $0.tone != .none || $0.hasDStroke
+            $0.modifier != .none || $0.tone != .none
         }
         guard hasTransformation else { return nil }
 
         // Don't restore if the syllable is structurally valid.
         if SpellingChecker.isValidSyllable(buffer) { return nil }
 
-        // Avoid a no-op replacement if nothing would change on screen.
+        // Nothing to fix if the screen already shows the raw keystrokes.
         let composed = buffer.text
         if composed == rawKeystrokes { return nil }
 

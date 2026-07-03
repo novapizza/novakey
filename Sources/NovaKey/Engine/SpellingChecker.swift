@@ -20,6 +20,14 @@ enum SpellingChecker {
         // Must have at least one vowel
         guard !vowelCluster.isEmpty else { return false }
 
+        // Vowels must be contiguous. A consonant between two vowels means
+        // this cannot be a single Vietnamese syllable (e.g. "cofe"), even
+        // though the extracted vowel cluster ("oe") looks valid on its own.
+        if let first = buffer.firstVowelIndex, let last = buffer.lastVowelIndex,
+           buffer.chars[first...last].contains(where: { !$0.isVowel }) {
+            return false
+        }
+
         // "gi" + vowel: the leading 'i' is part of the consonant digraph, not
         // the nucleus (e.g. "giữa" -> nucleus "ưa"/"ua", not "iua"). When the
         // buffer starts with 'g' followed by an 'i' that has more vowels after
@@ -56,22 +64,6 @@ enum SpellingChecker {
         return true
     }
 
-    /// Check if a partial buffer could potentially become a valid syllable
-    /// (for deciding whether to apply Telex transformations).
-    static func couldBeValidSyllable(_ buffer: SyllableBuffer) -> Bool {
-        // Empty or single character is always potentially valid
-        if buffer.count <= 1 { return true }
-
-        let initial = buffer.initialConsonant.lowercased()
-
-        // If we only have consonants so far, check if they could be a valid initial
-        if buffer.vowelCount == 0 {
-            return couldBeValidInitial(initial)
-        }
-
-        return true
-    }
-
     // MARK: - Initial Consonants
 
     /// Valid single and multi-character initial consonants.
@@ -86,13 +78,6 @@ enum SpellingChecker {
 
     private static func isValidInitialConsonant(_ c: String) -> Bool {
         validInitials.contains(c)
-    }
-
-    /// Could this string be the start of a valid initial consonant?
-    /// Used during typing when the syllable is still being composed.
-    private static func couldBeValidInitial(_ c: String) -> Bool {
-        if c.isEmpty { return true }
-        return validInitials.contains(where: { $0.hasPrefix(c) })
     }
 
     // MARK: - Final Consonants

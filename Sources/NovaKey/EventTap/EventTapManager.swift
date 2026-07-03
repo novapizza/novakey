@@ -166,6 +166,7 @@ final class EventTapManager {
 
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
+        #if DEBUG
         let keyChar = KeyCode(rawValue: keyCode)?.asciiLetter.map(String.init) ?? "?"
         let flagStr = [
             flags.contains(.maskShift) ? "Shift" : nil,
@@ -174,6 +175,7 @@ final class EventTapManager {
             flags.contains(.maskCommand) ? "Cmd" : nil,
         ].compactMap { $0 }.joined(separator: "+")
         Log.debug("keyDown: \(keyChar) (0x\(String(keyCode, radix: 16))) flags=[\(flagStr)] vi=\(engine.isVietnameseMode)")
+        #endif
 
         // Check for hotkey toggle (Option+Z by default)
         if isToggleHotkey(keyCode: keyCode, flags: flags) {
@@ -201,14 +203,14 @@ final class EventTapManager {
             return passThrough
 
         case .replace(let bs, let text):
-            Log.info("REPLACE: \(bs) backspaces + '\(text)'")
+            Log.debug("REPLACE: \(bs) backspaces + '\(text)'")
             keySender.execute(result: result, proxy: proxy)
             return nil
 
         case .restore(let bs, let text):
             // Invalid syllable at word-break: emit the raw-keystroke restore
             // synthetically, then let the original word-break key pass through.
-            Log.info("RESTORE: \(bs) backspaces + '\(text)'")
+            Log.debug("RESTORE: \(bs) backspaces + '\(text)'")
             keySender.execute(result: .replace(backspaces: bs, text: text), proxy: proxy)
             return passThrough
         }

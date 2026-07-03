@@ -622,6 +622,134 @@ test("invalid syllable restore does not leave resumable state") {
     try expectTrue(engine.buffer.isEmpty)
 }
 
+// ============================================================
+// Validity gating: English words must not trigger Telex transforms
+// ============================================================
+print("\n--- Validity Gating (English-word protection) ---")
+
+test("corr -> cor (double-press undo consumes one r, no re-apply)") {
+    try expect(typeAndGetText("corr"), "cor")
+}
+
+test("corrr -> corr (invalid ending 'r' blocks tone re-apply, no oscillation)") {
+    try expect(typeAndGetText("corrr"), "corr")
+}
+
+test("class stays class (invalid initial 'cl' blocks tone)") {
+    try expect(typeAndGetText("class"), "class")
+}
+
+test("know stays know (invalid initial 'kn' blocks horn)") {
+    try expect(typeAndGetText("know"), "know")
+}
+
+test("add stays add (dd only converts at syllable start)") {
+    try expect(typeAndGetText("add"), "add")
+}
+
+test("ddoong -> đông (đ + circumflex still work at syllable start)") {
+    try expect(typeAndGetText("ddoong"), "\u{0111}\u{00F4}ng") // đông
+}
+
+test("coffee -> cofee live (non-contiguous vowels block ee -> ê)") {
+    // f tones then un-tones (consuming one f); the final 'e' must NOT
+    // become ê because "cofe" is not a single Vietnamese syllable.
+    try expect(typeAndGetText("coffee"), "cofee")
+}
+
+// ============================================================
+// Double-press escape is always trusted (n+1 typing style)
+// ============================================================
+print("\n--- Double-Press Escape ---")
+
+test("noww + space -> 'now' (escape kept, never resurrected to raw)") {
+    let (result, composed) = typeThenSpace("noww")
+    try expect(composed, "now")
+    try expect(result, EngineResult.wordBreak)
+}
+
+test("hass + space -> 'has'") {
+    let (result, composed) = typeThenSpace("hass")
+    try expect(composed, "has")
+    try expect(result, EngineResult.wordBreak)
+}
+
+test("disst + space -> 'dist' (escape mid-word, then keep typing)") {
+    let (result, composed) = typeThenSpace("disst")
+    try expect(composed, "dist")
+    try expect(result, EngineResult.wordBreak)
+}
+
+test("tesst + space -> 'test'") {
+    let (result, composed) = typeThenSpace("tesst")
+    try expect(composed, "test")
+    try expect(result, EngineResult.wordBreak)
+}
+
+test("passs + space -> 'pass' (double letter needs triple press)") {
+    let (result, composed) = typeThenSpace("passs")
+    try expect(composed, "pass")
+    try expect(result, EngineResult.wordBreak)
+}
+
+test("corrrection + space -> 'correction' (3-r style composes clean)") {
+    let (result, composed) = typeThenSpace("corrrection")
+    try expect(composed, "correction")
+    try expect(result, EngineResult.wordBreak)
+}
+
+test("cofffee + space -> 'coffee'") {
+    let (result, composed) = typeThenSpace("cofffee")
+    try expect(composed, "coffee")
+    try expect(result, EngineResult.wordBreak)
+}
+
+test("errror + space -> 'error'") {
+    let (result, composed) = typeThenSpace("errror")
+    try expect(composed, "error")
+    try expect(result, EngineResult.wordBreak)
+}
+
+test("ddw -> đư (standalone w works after đ)") {
+    try expect(typeAndGetText("ddw"), "\u{0111}\u{01B0}") // đư
+}
+
+test("ddwowngf -> đường") {
+    try expect(typeAndGetText("ddwowngf"), "\u{0111}\u{01B0}\u{1EDD}ng") // đường
+}
+
+test("dduwowngf -> đường (long form still works)") {
+    try expect(typeAndGetText("dduwowngf"), "\u{0111}\u{01B0}\u{1EDD}ng") // đường
+}
+
+test("ddwa -> đưa") {
+    try expect(typeAndGetText("ddwa"), "\u{0111}\u{01B0}a") // đưa
+}
+
+test("swift stays swift (w after plain consonant is literal)") {
+    try expect(typeAndGetText("swift"), "swift")
+}
+
+test("dd + space -> 'đ' kept (standalone đ is never unwound)") {
+    let (result, composed) = typeThenSpace("dd")
+    try expect(composed, "\u{0111}") // đ
+    try expect(result, EngineResult.wordBreak)
+}
+
+test("ddc + space -> 'đc' kept (texting shorthand)") {
+    let (result, composed) = typeThenSpace("ddc")
+    try expect(composed, "\u{0111}c") // đc
+    try expect(result, EngineResult.wordBreak)
+}
+
+test("correction (2 r's) + space -> 'corection' (known n-press limit, no restore)") {
+    // Without an English dictionary the engine cannot tell a 2-press double
+    // letter from a deliberate escape; the escape interpretation wins.
+    let (result, composed) = typeThenSpace("correction")
+    try expect(composed, "corection")
+    try expect(result, EngineResult.wordBreak)
+}
+
 } // end runAllTests()
 
 func printSummary() {
