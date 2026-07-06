@@ -214,6 +214,28 @@ impl TelexEngine {
         let vi_char = ViChar::with(lower, VowelModifier::Plain, ToneMark::None, is_upper);
         self.buffer.append(vi_char);
 
+        let mut transformed = false;
+
+        // Forward "ươ" linking (Windows enhancement, not in the Swift engine):
+        // an 'o' typed right after a horned 'ư' auto-takes the horn, because ư
+        // and ơ always co-occur in Vietnamese (there is no valid "ư"+plain-"o").
+        // This makes the "type uw first" style work: "thuwong" -> "thương",
+        // "tuwongr" -> "tưởng". A later explicit 'w' on this 'o' confirms rather
+        // than undoes the horn (see handle_vowel_modifier), so the canonical
+        // two-'w' style "thuwowng" still lands on the same result.
+        let last = self.buffer.count() - 1;
+        if lower == 'o' && last >= 1 {
+            let prev = self.buffer.chars[last - 1];
+            if prev.base == 'u'
+                && prev.modifier == VowelModifier::Horn
+                && self.buffer.chars[last].modifier == VowelModifier::Plain
+            {
+                self.buffer.apply_modifier(VowelModifier::Horn, last);
+                self.buffer.chars[last].auto_horn = true;
+                transformed = true;
+            }
+        }
+
         // After adding any letter, re-check tone placement. Matters for vowel
         // appends: "hos" -> "hó", then "a" -> "hoá" (tone moves to 2nd vowel).
         if self.buffer.current_tone != ToneMark::None {
@@ -221,14 +243,16 @@ impl TelexEngine {
                 if let Some(new_position) = find_tone_position(&self.buffer) {
                     if new_position != current_tone_idx {
                         self.buffer.move_tone(new_position);
-                        self.last_raw_key = Some(lower);
-                        return self.build_replacement(&pre_append_text, &self.buffer.text());
+                        transformed = true;
                     }
                 }
             }
         }
 
         self.last_raw_key = Some(lower);
+        if transformed {
+            return self.build_replacement(&pre_append_text, &self.buffer.text());
+        }
         EngineResult::PassThrough
     }
 
@@ -363,8 +387,20 @@ impl TelexEngine {
                 if let Some(target_idx) = self.buffer.last_index_of_base(target) {
                     let current_mod = self.buffer.chars[target_idx].modifier;
 
-                    // Already has this modifier -> undo (double-press reversal).
+                    // Already has this modifier -> undo (double-press reversal),
+                    // EXCEPT: a 'w' on an 'o' whose horn was auto-applied by
+                    // forward "ươ" linking is redundant confirmation, not an
+                    // escape — consume it and keep the ơ. This lets the
+                    // canonical two-'w' style ("thuwowng") converge with the
+                    // "uw first" style ("thuwong").
                     if current_mod == modifier {
+                        if target == 'o' && self.buffer.chars[target_idx].auto_horn {
+                            self.buffer.chars[target_idx].auto_horn = false;
+                            return Some(EngineResult::Replace {
+                                backspaces: 0,
+                                text: String::new(),
+                            });
+                        }
                         return Some(self.undo_vowel_modifier(key, target_idx, is_upper));
                     }
 

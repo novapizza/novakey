@@ -65,6 +65,11 @@ pub struct ViChar {
     pub is_upper: bool,
     /// Whether this 'd' has been converted to 'đ'.
     pub has_dstroke: bool,
+    /// Whether this vowel's horn was applied automatically by forward "ươ"
+    /// linking (an 'o' auto-horned because it follows a 'ư'), rather than by an
+    /// explicit 'w'. Lets a subsequent redundant 'w' confirm the horn instead
+    /// of undoing it. Windows-only enhancement; not present in the Swift engine.
+    pub auto_horn: bool,
 }
 
 impl ViChar {
@@ -75,6 +80,7 @@ impl ViChar {
             tone: ToneMark::None,
             is_upper: false,
             has_dstroke: false,
+            auto_horn: false,
         }
     }
 
@@ -85,6 +91,7 @@ impl ViChar {
             tone,
             is_upper,
             has_dstroke: false,
+            auto_horn: false,
         }
     }
 
