@@ -109,9 +109,9 @@ certificate — no separate identity secret is needed.
 Signed artifacts are also mirrored to Cloudflare R2 at
 `novakey/<tag>/` (immutable) and `novakey/latest/` (rolling) via the S3 API.
 
-> The Windows job's build step is a placeholder — NovaKey sources are macOS-only
-> today. Implement a Windows target that emits `build/NovaKey.exe`; signing and
-> release upload are already wired.
+The Windows job builds the Rust port in [crossplatform/](crossplatform/)
+(`cargo build -p novakey-win --release`), runs the engine parity suite, then
+signs the resulting `novakey.exe`. The macOS Swift app is unchanged.
 
 ### Run
 

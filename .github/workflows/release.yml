@@ -80,14 +80,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build (placeholder — replace with real Windows build)
+      - name: Install Rust (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crossplatform
+
+      - name: Test engine parity + Windows units
+        shell: pwsh
+        working-directory: crossplatform
+        run: cargo test --release
+
+      - name: Build novakey.exe
+        shell: pwsh
+        working-directory: crossplatform
+        run: cargo build -p novakey-win --release
+
+      - name: Stage artifact
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build | Out-Null
-          # TODO: produce build/NovaKey.exe (and any DLLs/installer) here.
-          if (-not (Test-Path build/NovaKey.exe)) {
-            Write-Error "No Windows build output. Implement the Windows build target."
-          }
+          Copy-Item crossplatform/target/release/novakey.exe build/NovaKey.exe
 
       - name: Install Trusted Signing client
         shell: pwsh
