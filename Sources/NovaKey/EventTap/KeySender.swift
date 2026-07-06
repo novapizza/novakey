@@ -18,6 +18,11 @@ final class KeySender {
     /// to defeat browser autocomplete interference.
     var fixBrowserAutocomplete: Bool = true
 
+    /// The kind of the frontmost browser (updated on app activation). The
+    /// autocomplete guard is scoped to browsers and tailored per kind. Read/
+    /// written on the main thread, so no synchronization is needed.
+    var browserKind: BrowserKind = .none
+
     init(sourceManager: EventSourceManager) {
         self.sourceManager = sourceManager
     }
@@ -36,33 +41,57 @@ final class KeySender {
             execute(result: .replace(backspaces: backspaces, text: text), proxy: proxy)
 
         case .replace(let backspaces, let text):
+            // Whether the frontmost app's URL bar needs autocomplete guarding.
+            let guardAutocomplete = fixBrowserAutocomplete && browserKind != .none
+
             // Send backspaces to delete old characters.
-            // Inline autocomplete (browser URL bars, Spotlight) keeps its
-            // suggested suffix as selected text, and the first backspace only
-            // clears that selection instead of deleting a typed character
-            // ("dd" -> "dđ" instead of "đ"). Probe the focused element's
-            // selection to compensate exactly.
+            //
+            // Inline autocomplete in browser URL/address bars keeps its
+            // suggested suffix *selected*, so the first backspace only clears
+            // that selection instead of deleting a typed character
+            // ("dd" -> "dđ" instead of "đ"). The compensation differs by
+            // browser (see BrowserKind):
+            //   - .chromium: the omnibox hides its selection from Accessibility,
+            //     so prepend a narrow no-break space (U+202F) and send one extra
+            //     backspace. The U+202F collapses the selection, then the
+            //     backspaces (now N+1) delete it back out along with the real
+            //     characters. Self-correcting — harmless when no selection.
+            //   - .native (Safari): re-runs autocomplete after an injected char
+            //     (defeating the U+202F trick) and doesn't expose the inline
+            //     completion via AX selection queries (defeating a probe). Send
+            //     a forward-delete instead: it deletes just the selected suffix
+            //     when one is present, and is a no-op when the caret sits at the
+            //     end of the text with nothing selected. Deletion doesn't
+            //     retrigger Safari's inline completion, so the N real backspaces
+            //     that follow land on real characters.
             if backspaces > 0 {
                 var count = backspaces
-                if fixBrowserAutocomplete {
-                    if let selectionLength = focusedSelectionLength() {
-                        if selectionLength > 0 {
-                            count += 1
-                            Log.debug("Autocomplete selection of \(selectionLength) chars; sending \(count) backspaces")
-                        }
-                    } else {
-                        // Focused element doesn't answer accessibility queries;
-                        // fall back to the invisible-character trick.
+                if guardAutocomplete {
+                    switch browserKind {
+                    case .none:
+                        break
+                    case .chromium:
                         sendEmptyCharacter(proxy: proxy)
                         count += 1
+                    case .native:
+                        sendForwardDelete(proxy: proxy)
                     }
                 }
                 sendBackspaces(count: count, proxy: proxy)
             }
 
-            // Send replacement text
+            // Send replacement text.
+            //
+            // In browsers, always send the whole text as a single event, even
+            // in step-by-step mode: the omnibox re-runs inline autocomplete
+            // asynchronously on every insertion, so injecting "ếng" as three
+            // rapid events lets a completion (with its selected suffix) land
+            // *between* our characters and corrupt the word. One event means
+            // one text change — any completion lands after the batch, where
+            // the next replacement's guard or the user's next real keystroke
+            // handles it, exactly like normal typing.
             if !text.isEmpty {
-                if stepByStepMode {
+                if stepByStepMode && !guardAutocomplete {
                     sendTextStepByStep(text, proxy: proxy)
                 } else {
                     sendTextBatch(text, proxy: proxy)
@@ -158,45 +187,26 @@ final class KeySender {
 
     // MARK: - Browser Fix
 
-    /// System-wide accessibility element, used to locate the focused text field.
-    /// The short messaging timeout keeps the event-tap callback fast even when
-    /// the focused app is slow to answer AX queries.
-    private lazy var systemWideElement: AXUIElement = {
-        let element = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(element, 0.05)
-        return element
-    }()
+    /// Send a forward-delete (keycode 0x75) to collapse Safari's inline
+    /// autocomplete: it deletes the selected suggestion suffix when present,
+    /// and is a no-op when the caret is at the end of the text unselected.
+    /// (Rare caveat: if the caret were mid-text with no selection it would eat
+    /// the next character, but Safari only inline-completes at the end of the
+    /// field, and the engine resets its session on clicks/arrows, so a
+    /// replacement can't fire mid-text in practice.)
+    private func sendForwardDelete(proxy: CGEventTapProxy) {
+        let forwardDeleteKeyCode: CGKeyCode = 0x75
 
-    /// Length of the selected text in the currently focused UI element,
-    /// or nil if the element can't be queried via accessibility.
-    ///
-    /// A non-zero selection at replacement time means inline autocomplete is
-    /// showing (the engine resets its session on clicks and non-letter keys,
-    /// so a user-made selection can't survive into a replacement).
-    private func focusedSelectionLength() -> Int? {
-        var focusedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(systemWideElement,
-                                            kAXFocusedUIElementAttribute as CFString,
-                                            &focusedRef) == .success,
-              let focused = focusedRef,
-              CFGetTypeID(focused) == AXUIElementGetTypeID() else {
-            return nil
+        guard let keyDown = CGEvent(keyboardEventSource: sourceManager.source,
+                                    virtualKey: forwardDeleteKeyCode, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: sourceManager.source,
+                                  virtualKey: forwardDeleteKeyCode, keyDown: false) else {
+            return
         }
-        let element = focused as! AXUIElement
-
-        var rangeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element,
-                                            kAXSelectedTextRangeAttribute as CFString,
-                                            &rangeRef) == .success,
-              let rangeValue = rangeRef,
-              CFGetTypeID(rangeValue) == AXValueGetTypeID() else {
-            return nil
-        }
-        var range = CFRange()
-        guard AXValueGetValue((rangeValue as! AXValue), .cfRange, &range) else {
-            return nil
-        }
-        return range.length
+        markNonCoalesced(keyDown)
+        markNonCoalesced(keyUp)
+        keyDown.tapPostEvent(proxy)
+        keyUp.tapPostEvent(proxy)
     }
 
     /// Send a narrow no-break space (U+202F) to defeat browser URL bar autocomplete
