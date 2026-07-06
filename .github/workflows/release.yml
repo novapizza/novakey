@@ -1,4 +1,4 @@
-name: Release
+name: Release NovaKey
 
 # Tag a release: git tag v1.0.0 && git push --tags
 on:
@@ -71,10 +71,9 @@ jobs:
           name: novakey-macos
           path: NovaKey-macos.zip
 
-  # ── Windows: signtool + Azure Trusted Signing ─────────────────────────────
-  # NOTE: NovaKey sources are macOS-only (Cocoa/Carbon). The build step below is
-  # a placeholder — implement a Windows target that produces build/NovaKey.exe,
-  # then this job signs it. Signing/packaging is otherwise ready.
+  # ── Windows: build Rust port + signtool + Azure Trusted Signing ───────────
+  # Builds novakey-win (crossplatform/windows) → NovaKey.exe, signs via
+  # Azure Trusted Signing, packages the zip.
   windows:
     runs-on: windows-latest
     steps:
