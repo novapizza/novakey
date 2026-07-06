@@ -17,6 +17,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// Resource id of the embedded application icon (see build.rs).
 pub const APP_ICON_ID: u16 = 1;
 
+/// Resource id of the "Vietnamese ON" tray icon variant (see build.rs).
+pub const APP_ICON_V_ID: u16 = 2;
+
 /// Callback message the tray icon posts to our window (WM_APP + n).
 pub const WM_TRAY: u32 = 0x0400 + 1; // WM_APP + 1
 
@@ -29,13 +32,13 @@ pub const CMD_QUIT: usize = 5;
 
 const TRAY_UID: u32 = 1;
 
-/// Load the embedded NovaKey icon (resource id 1). Falls back to the default
-/// Windows application icon if it can't be found.
-pub fn app_icon() -> HICON {
+/// Load an embedded icon by resource id. Falls back to the default Windows
+/// application icon if it can't be found.
+fn load_icon(id: u16) -> HICON {
     unsafe {
         if let Ok(hmod) = GetModuleHandleW(None) {
             // MAKEINTRESOURCE: a numeric resource id passed as a PCWSTR.
-            let name = PCWSTR(APP_ICON_ID as usize as *const u16);
+            let name = PCWSTR(id as usize as *const u16);
             if let Ok(icon) = LoadIconW(HINSTANCE(hmod.0), name) {
                 if !icon.is_invalid() {
                     return icon;
@@ -46,7 +49,19 @@ pub fn app_icon() -> HICON {
     }
 }
 
-fn base_data(hwnd: HWND) -> NOTIFYICONDATAW {
+/// The default NovaKey application icon (resource id 1). Used for the window
+/// class and as the "Vietnamese OFF" tray icon.
+pub fn app_icon() -> HICON {
+    load_icon(APP_ICON_ID)
+}
+
+/// Pick the tray icon for the current state: the "V" variant when Vietnamese
+/// input is enabled, the plain icon otherwise.
+fn tray_icon(enabled: bool) -> HICON {
+    load_icon(if enabled { APP_ICON_V_ID } else { APP_ICON_ID })
+}
+
+fn base_data(hwnd: HWND, enabled: bool) -> NOTIFYICONDATAW {
     let mut data = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
@@ -55,7 +70,7 @@ fn base_data(hwnd: HWND) -> NOTIFYICONDATAW {
     };
     data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     data.uCallbackMessage = WM_TRAY;
-    data.hIcon = app_icon();
+    data.hIcon = tray_icon(enabled);
     data
 }
 
@@ -67,7 +82,7 @@ fn set_tip(data: &mut NOTIFYICONDATAW, tip: &str) {
 
 /// Add the tray icon.
 pub fn add(hwnd: HWND, enabled: bool) {
-    let mut data = base_data(hwnd);
+    let mut data = base_data(hwnd, enabled);
     set_tip(&mut data, tip_for(enabled));
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &data);
@@ -76,7 +91,7 @@ pub fn add(hwnd: HWND, enabled: bool) {
 
 /// Update the tooltip to reflect the current on/off state.
 pub fn update(hwnd: HWND, enabled: bool) {
-    let mut data = base_data(hwnd);
+    let mut data = base_data(hwnd, enabled);
     set_tip(&mut data, tip_for(enabled));
     unsafe {
         let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
