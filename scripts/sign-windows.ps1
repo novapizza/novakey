@@ -9,8 +9,9 @@
 
     Prerequisites:
       * Windows SDK (provides signtool.exe), or set env SIGNTOOL to its path.
-      * Trusted Signing client (provides Azure.CodeSigning.Dlib.dll):
-            dotnet tool install --global Microsoft.Trusted.Signing.Client   # or the NuGet pkg
+      * Trusted Signing client (provides Azure.CodeSigning.Dlib.dll) — NuGet pkg,
+        not a dotnet tool:
+            nuget install Microsoft.Trusted.Signing.Client -OutputDirectory <dir>
         Set env TRUSTED_SIGNING_DLIB to the dll path, or let this script probe.
       * Azure auth for the signing service principal (DefaultAzureCredential):
             AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET

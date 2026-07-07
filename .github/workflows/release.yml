@@ -106,7 +106,13 @@ jobs:
 
       - name: Install Trusted Signing client
         shell: pwsh
-        run: dotnet tool install --global Microsoft.Trusted.Signing.Client
+        run: |
+          # Microsoft.Trusted.Signing.Client is a NuGet package, NOT a dotnet tool.
+          nuget install Microsoft.Trusted.Signing.Client -Version 1.0.86 `
+            -OutputDirectory "$env:RUNNER_TEMP\ts" -ExcludeVersion
+          $dlib = Join-Path $env:RUNNER_TEMP "ts\Microsoft.Trusted.Signing.Client\bin\x64\Azure.CodeSigning.Dlib.dll"
+          if (-not (Test-Path $dlib)) { throw "dlib not found at $dlib" }
+          "TRUSTED_SIGNING_DLIB=$dlib" >> $env:GITHUB_ENV
 
       - name: Write Trusted Signing metadata
         shell: pwsh
