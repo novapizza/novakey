@@ -180,6 +180,6 @@ jobs:
           # Versioned copy (immutable) + rolling "latest" for download links.
           for f in dist/*.zip; do
             base="$(basename "$f")"
-            aws s3 cp "$f" "s3://${R2_BUCKET}/novakey/${TAG}/${base}" --endpoint-url "$ENDPOINT"
-            aws s3 cp "$f" "s3://${R2_BUCKET}/novakey/latest/${base}"  --endpoint-url "$ENDPOINT"
+            aws s3 cp "$f" "s3://${R2_BUCKET}/${TAG}/${base}" --endpoint-url "$ENDPOINT"
+            aws s3 cp "$f" "s3://${R2_BUCKET}/latest/${base}"  --endpoint-url "$ENDPOINT"
           done
