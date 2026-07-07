@@ -183,6 +183,7 @@ impl SyllableBuffer {
             return;
         }
         self.chars[index].modifier = VowelModifier::Plain;
+        self.chars[index].auto_horn = false;
     }
 
     /// Mark the character at `index` as d-stroke (đ).

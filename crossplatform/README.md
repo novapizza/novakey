@@ -48,6 +48,26 @@ tray icon or press **Ctrl+Shift+Z** to toggle Vietnamese input on/off;
 right-click for the menu (toggle, Start with Windows, compatibility mode, quit).
 Settings persist to `%APPDATA%\NovaKey\settings.json`.
 
+## Typing styles (ươ / uw-first)
+
+The engine composes `ươ` from any of these, so both common Telex habits work:
+
+| Keys        | Result  | How                                   |
+|-------------|---------|---------------------------------------|
+| `tuowngr`   | tưởng   | canonical: `uo` then one `w`          |
+| `tuwongr`   | tưởng   | `uw`-first: `uw`→ư, then a plain `o`  |
+| `tuwowngr`  | tưởng   | `uw` + `ow` (redundant `w` confirmed) |
+
+This is **forward `ươ` linking** (a Windows-only addition — the frozen Swift
+engine lacks it): an `o` typed right after a horned `ư` auto-takes the horn,
+since `ư` and `ơ` always co-occur in Vietnamese. A later explicit `w` on that
+`o` confirms rather than undoes it, so the escape mechanism (`noww`→`now`) and
+English protection are untouched. See `core/tests/uw_style.rs`.
+
+Note: `tw`→`tư` is intentionally **not** supported (in both macOS and Windows) —
+a bare consonant+`w` rule would wreck English words like `swift`, `two`, `twin`.
+Type `uw` for a standalone `ư`.
+
 ## How it works
 
 - A hidden message-only window installs `WH_KEYBOARD_LL` + `WH_MOUSE_LL` and a
