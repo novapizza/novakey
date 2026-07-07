@@ -1,0 +1,11 @@
+[package]
+name = "novakey-core"
+version = "0.1.0"
+edition = "2021"
+description = "Platform-agnostic Telex Vietnamese IME engine (Rust port of the NovaKey Swift engine)"
+license = "MIT"
+
+# No dependencies on purpose: all output is precomposed NFC BMP scalars, so no
+# unicode normalization crate is needed. This keeps the full parity suite
+# runnable on any host (macOS dev machine / CI / Windows).
+[dependencies]

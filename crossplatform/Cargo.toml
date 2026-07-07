@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["core", "windows"]
+# "linux" reserved for a future IBus/Fcitx crate — add here when created.
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
