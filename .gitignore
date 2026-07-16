@@ -8,3 +8,5 @@ DerivedData/
 /tmp/
 *.log
 ref/
+dist/
+.claude/

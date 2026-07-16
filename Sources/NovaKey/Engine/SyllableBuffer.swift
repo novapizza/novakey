@@ -48,7 +48,7 @@ struct SyllableBuffer {
 
     /// Number of vowels in the buffer.
     var vowelCount: Int {
-        chars.count(where: { $0.isVowel })
+        chars.filter { $0.isVowel }.count
     }
 
     /// Index of the first vowel, or nil if none.

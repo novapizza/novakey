@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var eventTapManager: EventTapManager!
     private var statusBarController: StatusBarController!
     private var settingsWindow: NSWindow?
+    private let browserWatcher = BrowserWatcher()
 
     // MARK: - App Lifecycle
 
@@ -70,6 +71,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController.onQuit = {
             NSApplication.shared.terminate(nil)
         }
+
+        // Track the frontmost app so the autocomplete guard is scoped to
+        // browsers. Push the flag into the sender on every activation change.
+        browserWatcher.onChange = { [weak self] kind in
+            self?.eventTapManager.keySender.browserKind = kind
+        }
+        browserWatcher.start()
+        eventTapManager.keySender.browserKind = browserWatcher.kind
 
         // Start event tap
         startEventTap()

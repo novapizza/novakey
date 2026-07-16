@@ -1,0 +1,5 @@
+{
+  "Endpoint": "https://eus.codesigning.azure.net/",
+  "CodeSigningAccountName": "REPLACE_WITH_TRUSTED_SIGNING_ACCOUNT",
+  "CertificateProfileName": "REPLACE_WITH_CERTIFICATE_PROFILE"
+}
