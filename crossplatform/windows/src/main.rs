@@ -9,9 +9,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod hook;
+mod hotkey;
 mod sender;
 mod settings;
 mod tray;
+mod ui;
 mod vk;
 
 use std::cell::RefCell;
@@ -19,6 +21,7 @@ use std::cell::RefCell;
 use windows::core::PWSTR;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
@@ -26,21 +29,27 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, MOD_CONTROL, MOD_SHIFT, VK_Z,
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
     GetMessageW, GetWindowThreadProcessId, PostQuitMessage, RegisterClassW, SetWindowsHookExW,
-    TranslateMessage, EVENT_SYSTEM_FOREGROUND, HMENU, HWND_MESSAGE, MSG, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP,
-    WM_RBUTTONUP, WNDCLASSW,
+    TranslateMessage, EVENT_SYSTEM_FOREGROUND, HMENU, HWND_MESSAGE, MB_OK, MSG,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_COMMAND, WM_DESTROY, WM_HOTKEY,
+    WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
 };
 
 const HOTKEY_ID: i32 = 1;
 
+/// App-defined message the Settings window sends to (re)register the toggle
+/// hotkey: `wparam` = MOD_* bitmask, `lparam` = virtual-key. Returns 1 on
+/// success, 0 if the combination could not be registered.
+pub const WM_APP_SETHOTKEY: u32 = 0x0400 + 2; // WM_APP + 2
+
 thread_local! {
     /// Current settings; owned by the (single) message-pump thread.
-    static SETTINGS: RefCell<settings::Settings> = RefCell::new(settings::Settings::default());
+    pub(crate) static SETTINGS: RefCell<settings::Settings> =
+        RefCell::new(settings::Settings::default());
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -109,11 +118,13 @@ unsafe fn run() {
         WINEVENT_OUTOFCONTEXT,
     );
 
-    // Toggle hotkey: Ctrl+Shift+Z.
-    let _ = RegisterHotKey(hwnd, HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_Z.0 as u32);
+    // Toggle hotkey: from settings (defaults to Ctrl+Space).
+    let (hk_mods, hk_vk) =
+        SETTINGS.with(|s| (s.borrow().hotkey_mods, s.borrow().hotkey_vk));
+    let _ = register_toggle_hotkey(hwnd, hk_mods, hk_vk);
 
     // Tray icon.
-    tray::add(hwnd, hook::is_enabled());
+    tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc());
 
     // Seed the browser flag from the currently-focused window.
     hook::set_is_browser(window_is_browser(GetForegroundWindow()));
@@ -200,7 +211,7 @@ unsafe extern "system" fn wnd_proc(
             // lParam carries the originating mouse message.
             let mouse = lparam.0 as u32;
             if mouse == WM_LBUTTONUP {
-                do_toggle(hwnd);
+                ui::open(hwnd);
             } else if mouse == WM_RBUTTONUP {
                 let (autostart, step) =
                     SETTINGS.with(|s| (s.borrow().start_with_windows, s.borrow().step_by_step));
@@ -220,6 +231,12 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        WM_APP_SETHOTKEY => {
+            let mods = wparam.0 as u32;
+            let vk = lparam.0 as u32;
+            let ok = set_toggle_hotkey(hwnd, mods, vk);
+            LRESULT(if ok { 1 } else { 0 })
+        }
         WM_COMMAND => {
             let cmd = (wparam.0 & 0xFFFF) as usize;
             handle_command(hwnd, cmd);
@@ -236,17 +253,74 @@ unsafe extern "system" fn wnd_proc(
 
 unsafe fn do_toggle(hwnd: HWND) {
     let new = hook::toggle_enabled();
-    SETTINGS.with(|s| {
+    let play = SETTINGS.with(|s| {
         let mut s = s.borrow_mut();
         s.enabled = new;
         s.save();
+        s.play_sound
     });
-    tray::update(hwnd, new);
+    tray::update(hwnd, new, &current_hotkey_desc());
+    if play {
+        let _ = MessageBeep(MB_OK);
+    }
+    // Keep the Settings window's V/E indicator in sync if it is open.
+    ui::refresh();
+}
+
+/// Description of the currently-configured toggle hotkey (e.g. "Ctrl+Space").
+fn current_hotkey_desc() -> String {
+    SETTINGS.with(|s| {
+        let s = s.borrow();
+        hotkey::describe(s.hotkey_mods, s.hotkey_vk)
+    })
+}
+
+/// Register (replacing any existing) the global toggle hotkey. Returns whether
+/// registration succeeded. MOD_NOREPEAT keeps a held combo from auto-firing.
+unsafe fn register_toggle_hotkey(hwnd: HWND, mods: u32, vk: u32) -> bool {
+    let _ = UnregisterHotKey(hwnd, HOTKEY_ID);
+    RegisterHotKey(
+        hwnd,
+        HOTKEY_ID,
+        HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT.0),
+        vk,
+    )
+    .is_ok()
+}
+
+/// Try to switch to a new toggle hotkey. On success it is persisted and the tray
+/// tooltip refreshed; on failure the previous hotkey is restored so the toggle
+/// never ends up unbound.
+unsafe fn set_toggle_hotkey(hwnd: HWND, mods: u32, vk: u32) -> bool {
+    let (old_mods, old_vk) =
+        SETTINGS.with(|s| (s.borrow().hotkey_mods, s.borrow().hotkey_vk));
+
+    if register_toggle_hotkey(hwnd, mods, vk) {
+        SETTINGS.with(|s| {
+            let mut s = s.borrow_mut();
+            s.hotkey_mods = mods;
+            s.hotkey_vk = vk;
+            s.save();
+        });
+        tray::update(hwnd, hook::is_enabled(), &hotkey::describe(mods, vk));
+        true
+    } else {
+        let _ = register_toggle_hotkey(hwnd, old_mods, old_vk);
+        false
+    }
 }
 
 unsafe fn handle_command(hwnd: HWND, cmd: usize) {
     match cmd {
         tray::CMD_TOGGLE => do_toggle(hwnd),
+        tray::CMD_SETTINGS => ui::open(hwnd),
+        tray::CMD_PLAYSOUND => {
+            SETTINGS.with(|s| {
+                let mut s = s.borrow_mut();
+                s.play_sound = !s.play_sound;
+                s.save();
+            });
+        }
         tray::CMD_AUTOSTART => {
             let new = SETTINGS.with(|s| {
                 let mut s = s.borrow_mut();

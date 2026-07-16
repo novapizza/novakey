@@ -10,8 +10,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, SetForegroundWindow,
-    TrackPopupMenu, HICON, HMENU, IDI_APPLICATION, MF_CHECKED, MF_STRING, MF_UNCHECKED,
-    TPM_BOTTOMALIGN, TPM_RIGHTBUTTON,
+    TrackPopupMenu, HICON, HMENU, IDI_APPLICATION, MF_CHECKED, MF_SEPARATOR, MF_STRING,
+    MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON,
 };
 
 /// Resource id of the embedded application icon (see build.rs).
@@ -26,6 +26,8 @@ pub const CMD_AUTOSTART: usize = 2;
 pub const CMD_STEP: usize = 3;
 pub const CMD_AUTOCOMPLETE: usize = 4;
 pub const CMD_QUIT: usize = 5;
+pub const CMD_SETTINGS: usize = 6;
+pub const CMD_PLAYSOUND: usize = 7;
 
 const TRAY_UID: u32 = 1;
 
@@ -66,18 +68,18 @@ fn set_tip(data: &mut NOTIFYICONDATAW, tip: &str) {
 }
 
 /// Add the tray icon.
-pub fn add(hwnd: HWND, enabled: bool) {
+pub fn add(hwnd: HWND, enabled: bool, hotkey: &str) {
     let mut data = base_data(hwnd);
-    set_tip(&mut data, tip_for(enabled));
+    set_tip(&mut data, &tip_for(enabled, hotkey));
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &data);
     }
 }
 
-/// Update the tooltip to reflect the current on/off state.
-pub fn update(hwnd: HWND, enabled: bool) {
+/// Update the tooltip to reflect the current on/off state and hotkey.
+pub fn update(hwnd: HWND, enabled: bool, hotkey: &str) {
     let mut data = base_data(hwnd);
-    set_tip(&mut data, tip_for(enabled));
+    set_tip(&mut data, &tip_for(enabled, hotkey));
     unsafe {
         let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
     }
@@ -96,12 +98,9 @@ pub fn remove(hwnd: HWND) {
     }
 }
 
-fn tip_for(enabled: bool) -> &'static str {
-    if enabled {
-        "NovaKey — Vietnamese ON (Ctrl+Shift+Z)"
-    } else {
-        "NovaKey — Vietnamese OFF (Ctrl+Shift+Z)"
-    }
+fn tip_for(enabled: bool, hotkey: &str) -> String {
+    let state = if enabled { "ON" } else { "OFF" };
+    format!("NovaKey — Vietnamese {state} ({hotkey})")
 }
 
 /// Show the right-click context menu. Selecting an item posts WM_COMMAND to hwnd.
@@ -115,9 +114,12 @@ pub fn show_menu(hwnd: HWND, enabled: bool, autostart: bool, step: bool, fix_aut
         let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
 
         let _ = AppendMenuW(menu, MF_STRING | check(enabled), CMD_TOGGLE, w("Vietnamese input"));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_SETTINGS, w("Settings…"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING | check(autostart), CMD_AUTOSTART, w("Start with Windows"));
         let _ = AppendMenuW(menu, MF_STRING | check(step), CMD_STEP, w("Compatibility (step-by-step) mode"));
         let _ = AppendMenuW(menu, MF_STRING | check(fix_autocomplete), CMD_AUTOCOMPLETE, w("Fix browser URL autocomplete"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w("Quit NovaKey"));
 
         let mut pt = POINT::default();

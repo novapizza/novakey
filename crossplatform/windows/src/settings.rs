@@ -6,6 +6,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use crate::hotkey;
+
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "NovaKey";
 
@@ -19,6 +21,12 @@ pub struct Settings {
     pub start_with_windows: bool,
     /// Defeat browser URL-bar autocomplete with the U+202F prefix trick.
     pub fix_browser_autocomplete: bool,
+    /// Play a short system beep when the language is toggled.
+    pub play_sound: bool,
+    /// Language-toggle hotkey modifier bitmask (`RegisterHotKey` MOD_* flags).
+    pub hotkey_mods: u32,
+    /// Language-toggle hotkey virtual-key code.
+    pub hotkey_vk: u32,
 }
 
 impl Default for Settings {
@@ -28,6 +36,9 @@ impl Default for Settings {
             step_by_step: false,
             start_with_windows: false,
             fix_browser_autocomplete: true,
+            play_sound: false,
+            hotkey_mods: hotkey::DEFAULT_MODS,
+            hotkey_vk: hotkey::DEFAULT_VK,
         }
     }
 }
@@ -52,6 +63,9 @@ impl Settings {
                     read_bool(&text, "startWithWindows").unwrap_or(s.start_with_windows);
                 s.fix_browser_autocomplete = read_bool(&text, "fixBrowserAutocomplete")
                     .unwrap_or(s.fix_browser_autocomplete);
+                s.play_sound = read_bool(&text, "playSound").unwrap_or(s.play_sound);
+                s.hotkey_mods = read_u32(&text, "hotkeyMods").unwrap_or(s.hotkey_mods);
+                s.hotkey_vk = read_u32(&text, "hotkeyVk").unwrap_or(s.hotkey_vk);
             }
         }
         s
@@ -63,8 +77,14 @@ impl Settings {
                 let _ = fs::create_dir_all(dir);
             }
             let json = format!(
-                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {}\n}}\n",
-                self.enabled, self.step_by_step, self.start_with_windows, self.fix_browser_autocomplete
+                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {},\n  \"playSound\": {},\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {}\n}}\n",
+                self.enabled,
+                self.step_by_step,
+                self.start_with_windows,
+                self.fix_browser_autocomplete,
+                self.play_sound,
+                self.hotkey_mods,
+                self.hotkey_vk
             );
             let _ = fs::write(&path, json);
         }
@@ -85,6 +105,20 @@ fn read_bool(text: &str, key: &str) -> Option<bool> {
     } else {
         None
     }
+}
+
+/// Read a non-negative integer value for `"key": 123` from our flat JSON.
+fn read_u32(text: &str, key: &str) -> Option<u32> {
+    let needle = format!("\"{}\"", key);
+    let idx = text.find(&needle)?;
+    let rest = &text[idx + needle.len()..];
+    let colon = rest.find(':')?;
+    let digits: String = rest[colon + 1..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 // MARK: - Autostart (HKCU Run)
@@ -150,5 +184,29 @@ mod tests {
         assert_eq!(read_bool(json, "stepByStep"), Some(true));
         assert_eq!(read_bool(json, "startWithWindows"), Some(false));
         assert_eq!(read_bool(json, "missing"), None);
+    }
+
+    #[test]
+    fn parses_integers() {
+        let json = "{\n  \"hotkeyMods\": 2,\n  \"hotkeyVk\": 32\n}";
+        assert_eq!(read_u32(json, "hotkeyMods"), Some(2));
+        assert_eq!(read_u32(json, "hotkeyVk"), Some(32));
+        assert_eq!(read_u32(json, "missing"), None);
+    }
+
+    #[test]
+    fn round_trips_hotkey() {
+        // A saved-then-reparsed hotkey must survive intact.
+        let s = Settings {
+            hotkey_mods: 6,
+            hotkey_vk: 0x5A,
+            ..Settings::default()
+        };
+        let json = format!(
+            "{{\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {}\n}}",
+            s.hotkey_mods, s.hotkey_vk
+        );
+        assert_eq!(read_u32(&json, "hotkeyMods"), Some(6));
+        assert_eq!(read_u32(&json, "hotkeyVk"), Some(0x5A));
     }
 }
