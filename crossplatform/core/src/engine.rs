@@ -168,10 +168,36 @@ impl TelexEngine {
 
                 let ch = if shift { lower.to_ascii_uppercase() } else { lower };
 
+                // What is currently on screen, before this keystroke.
+                let screen_before = self.buffer.text();
                 // Record the raw keystroke (with original case) for restoration.
                 self.raw_keystrokes.push(ch);
 
-                self.process_letter(ch, shift)
+                let result = self.process_letter(ch, shift);
+
+                // Real-time English-word guard — part of Quick Vietnamese (kept
+                // off in default mode to preserve exact Swift-engine parity). If
+                // the composition is now a structurally invalid syllable carrying
+                // a diacritic that no longer matches the raw keys, abandon it and
+                // restore the literal keystrokes immediately — don't wait for the
+                // word break. e.g. "huawei": "hua"+w -> "hưa" (valid), +e ->
+                // "hưae" (invalid) -> restore "huawe", then +i -> "huawei".
+                // There is no "hưae…" syllable, so the horn was never intended.
+                // Because every prefix of a valid Vietnamese nucleus is itself
+                // valid, real Vietnamese words never hit this mid-word — only
+                // foreign/mixed input does. Runs here (not in process_letter) so
+                // it also covers the tone-key and d-key paths.
+                if self.quick_vietnamese
+                    && self.has_visible_transformation()
+                    && !is_valid_syllable(&self.buffer)
+                    && self.buffer.text() != self.raw_keystrokes
+                {
+                    let raw = self.raw_keystrokes.clone();
+                    self.rebuild_as_literal(&raw);
+                    return self.build_replacement(&screen_before, &raw);
+                }
+
+                result
             }
         }
     }
@@ -279,6 +305,31 @@ impl TelexEngine {
             return self.build_replacement(&pre_append_text, &self.buffer.text());
         }
         EngineResult::PassThrough
+    }
+
+    /// Whether any character carries a visible diacritic transformation (a vowel
+    /// modifier or a tone). A bare đ does not count — a vowel-less "đ" is a
+    /// legitimate standalone result.
+    fn has_visible_transformation(&self) -> bool {
+        self.buffer
+            .chars
+            .iter()
+            .any(|c| c.modifier != VowelModifier::Plain || c.tone != ToneMark::None)
+    }
+
+    /// Replace the buffer with the raw keystrokes as plain, unmodified letters,
+    /// so the remainder of the word is composed literally. Used by the inline
+    /// English-word guard once a transformation has proven to be a dead end.
+    fn rebuild_as_literal(&mut self, raw: &str) {
+        self.buffer.reset();
+        for c in raw.chars() {
+            self.buffer.append(ViChar::with(
+                c.to_ascii_lowercase(),
+                VowelModifier::Plain,
+                ToneMark::None,
+                c.is_ascii_uppercase(),
+            ));
+        }
     }
 
     // MARK: - Tone Handling
@@ -518,10 +569,7 @@ impl TelexEngine {
         // Only restore when a tone or vowel-modifier transformation is visible.
         // (đ deliberately does NOT count — it only fires syllable-initially and
         // a vowel-less "đ" is legitimate on its own.)
-        let has_transformation = self.buffer.chars.iter().any(|c| {
-            c.modifier != VowelModifier::Plain || c.tone != ToneMark::None
-        });
-        if !has_transformation {
+        if !self.has_visible_transformation() {
             return None;
         }
 
