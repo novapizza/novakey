@@ -93,3 +93,28 @@ fn uw_after_vowel_unchanged() {
     assert_eq!(typ("tuw", true), format!("t{U_HORN}"));
     assert_eq!(typ("tuw", false), format!("t{U_HORN}"));
 }
+
+// --- Safeguard: a second 'w' escapes the conjured ư back to a literal 'w' ---
+
+#[test]
+fn double_w_escapes_to_literal() {
+    // The reported bug: "tww" must be "tw" (English), NOT "tuw".
+    assert_eq!(typ("tww", true), "tw");
+    assert_eq!(typ("chww", true), "chw");
+    assert_eq!(typ("sww", true), "sw");
+    assert_eq!(typ("ngww", true), "ngw");
+}
+
+#[test]
+fn standalone_double_w_still_escapes() {
+    // The original standalone escape is preserved: "ww" -> "w".
+    assert_eq!(typ("ww", true), "w");
+    assert_eq!(typ("ww", false), "w");
+}
+
+#[test]
+fn real_uw_double_w_still_reverts_the_u() {
+    // A ư from a *real* "uw" (u was typed) reverts to "u"+"w", unchanged:
+    // "tuww" -> "tuw". Only the bare-w ư escapes to a lone "w".
+    assert_eq!(typ("tuww", true), "tuw");
+}

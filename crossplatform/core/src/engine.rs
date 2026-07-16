@@ -374,20 +374,25 @@ impl TelexEngine {
 
     /// Handle vowel modifier keys. Returns None if no modification can be applied.
     fn handle_vowel_modifier(&mut self, key: char, is_upper: bool) -> Option<EngineResult> {
-        // "ww" -> literal "w": first 'w' on empty buffer becomes 'ư' (standalone);
-        // pressing 'w' again reverts to literal 'w'.
-        if key == 'w'
-            && self.buffer.count() == 1
-            && self.buffer.chars[0].base == 'u'
-            && self.buffer.chars[0].modifier == VowelModifier::Horn
-            && self.raw_keystrokes.to_lowercase() == "ww"
-        {
-            let old_text = self.buffer.text();
-            self.buffer.reset();
-            self.buffer
-                .append(ViChar::with('w', VowelModifier::Plain, ToneMark::None, is_upper));
-            let new_text = self.buffer.text();
-            return Some(self.build_replacement(&old_text, &new_text));
+        // Escape hatch: a 'w' typed right after a 'ư' that was conjured from a
+        // *lone* 'w' (standalone `w`->`ư`, or Quick Vietnamese `<init>w`->`<init>ư`)
+        // reverts it to a literal 'w'. This keeps English/mixed fragments intact:
+        // "w"+w -> "w", "tw"+w -> "tw" — instead of leaking a spurious 'u' ("tuw").
+        if key == 'w' {
+            if let Some(last) = self.buffer.chars.last().copied() {
+                if last.base == 'u'
+                    && last.modifier == VowelModifier::Horn
+                    && last.tone == ToneMark::None
+                    && last.bare_w
+                {
+                    let old_text = self.buffer.text();
+                    self.buffer.remove_last();
+                    self.buffer
+                        .append(ViChar::with('w', VowelModifier::Plain, ToneMark::None, is_upper));
+                    let new_text = self.buffer.text();
+                    return Some(self.build_replacement(&old_text, &new_text));
+                }
+            }
         }
 
         // Special case: "ua" + w -> "ưa" (horn on u, a stays plain).
@@ -465,7 +470,9 @@ impl TelexEngine {
                 || (self.buffer.has_dstroke && self.buffer.vowel_count() == 0)
                 || (self.quick_vietnamese && self.is_quick_initial()))
         {
-            let vi_char = ViChar::with('u', VowelModifier::Horn, ToneMark::None, is_upper);
+            let mut vi_char = ViChar::with('u', VowelModifier::Horn, ToneMark::None, is_upper);
+            // Mark it so a following 'w' can escape back to a literal 'w'.
+            vi_char.bare_w = true;
             self.buffer.append(vi_char);
             return Some(EngineResult::Replace {
                 backspaces: 0,
