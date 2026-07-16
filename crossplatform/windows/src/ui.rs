@@ -37,12 +37,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::hotkey;
-use crate::tray::{CMD_AUTOCOMPLETE, CMD_AUTOSTART, CMD_PLAYSOUND, CMD_STEP, CMD_TOGGLE};
+use crate::tray::{
+    CMD_AUTOCOMPLETE, CMD_AUTOSTART, CMD_PLAYSOUND, CMD_QUICKVN, CMD_STEP, CMD_TOGGLE,
+};
 
 // MARK: - Layout constants (client pixels)
 
 const CLIENT_W: i32 = 460;
-const CLIENT_H: i32 = 646;
+const CLIENT_H: i32 = 708;
 const PAD: i32 = 18;
 const CARD_PAD: i32 = 16;
 const CARD_RADIUS: i32 = 14;
@@ -55,6 +57,7 @@ enum Region {
     PillVi,
     PillEn,
     HotkeyChange,
+    ToggleQuickVn,
     ToggleAutostart,
     ToggleSound,
     ToggleFix,
@@ -246,6 +249,7 @@ unsafe fn on_click(hwnd: HWND, x: i32, y: i32) {
                 send_cmd(main_hwnd, CMD_TOGGLE);
             }
         }
+        Region::ToggleQuickVn => send_cmd(main_hwnd, CMD_QUICKVN),
         Region::ToggleAutostart => send_cmd(main_hwnd, CMD_AUTOSTART),
         Region::ToggleSound => send_cmd(main_hwnd, CMD_PLAYSOUND),
         Region::ToggleFix => send_cmd(main_hwnd, CMD_AUTOCOMPLETE),
@@ -347,12 +351,13 @@ unsafe fn paint(hwnd: HWND) {
     // Snapshot the state we render.
     let enabled = crate::hook::is_enabled();
     let fix = crate::hook::is_fix_autocomplete();
-    let (autostart, step, sound, mods, vk) = crate::SETTINGS.with(|s| {
+    let (autostart, step, sound, quick_vn, mods, vk) = crate::SETTINGS.with(|s| {
         let s = s.borrow();
         (
             s.start_with_windows,
             s.step_by_step,
             s.play_sound,
+            s.quick_vietnamese,
             s.hotkey_mods,
             s.hotkey_vk,
         )
@@ -400,7 +405,7 @@ unsafe fn paint(hwnd: HWND) {
 
     // ----- Card: INPUT METHOD -----
     {
-        let card = rect(PAD, y, cw - PAD, y + 200);
+        let card = rect(PAD, y, cw - PAD, y + 262);
         fill_round(mem, card, CARD_RADIUS, CARD_BG);
         let ix = card.left + CARD_PAD;
         let ir = card.right - CARD_PAD;
@@ -456,6 +461,25 @@ unsafe fn paint(hwnd: HWND) {
         SelectObject(mem, f_row);
         draw_text(mem, "Input Method", rect(ix, cy, ix + 200, cy + 24), TEXT, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         draw_text(mem, "Telex", rect(ix, cy, ir, cy + 24), TEXT2, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+        cy += 24 + 12;
+
+        // Divider before the Quick Vietnamese option.
+        fill_solid(mem, rect(ix, cy, ir, cy + 1), DIVIDER);
+        cy += 14;
+
+        // Quick Vietnamese toggle + caption.
+        SelectObject(mem, f_row);
+        let qr = toggle_row(mem, ix, ir, cy, "Quick Vietnamese", quick_vn);
+        hits.push((Region::ToggleQuickVn, qr));
+        cy += 30;
+        SelectObject(mem, f_small);
+        draw_text(
+            mem,
+            "Type w → ư after an initial consonant (tw→tư, chw→chư)",
+            rect(ix, cy, ir, cy + 18),
+            TEXT2,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
 
         y = card.bottom + GAP;
     }

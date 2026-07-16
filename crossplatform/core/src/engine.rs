@@ -48,6 +48,10 @@ pub struct TelexEngine {
     pub buffer: SyllableBuffer,
     /// Whether Vietnamese mode is active.
     pub is_vietnamese_mode: bool,
+    /// "Quick Vietnamese" (Windows-only): a lone `w` typed right after a valid
+    /// syllable-initial consonant (cluster) becomes `ư`, e.g. "tw" -> "tư",
+    /// "chw" -> "chư". Off by default; opted in from Settings.
+    pub quick_vietnamese: bool,
 
     /// The last raw (lowercase) key typed, for double-press detection.
     last_raw_key: Option<char>,
@@ -70,6 +74,7 @@ impl TelexEngine {
         TelexEngine {
             buffer: SyllableBuffer::new(),
             is_vietnamese_mode: true,
+            quick_vietnamese: false,
             last_raw_key: None,
             raw_keystrokes: String::new(),
             saved_buffer: None,
@@ -176,6 +181,26 @@ impl TelexEngine {
         self.buffer.reset();
         self.last_raw_key = None;
         self.raw_keystrokes.clear();
+    }
+
+    /// Enable/disable "Quick Vietnamese" (w-after-initial-consonant -> ư).
+    /// Persists across `reset_session`, so it survives word breaks.
+    pub fn set_quick_vietnamese(&mut self, on: bool) {
+        self.quick_vietnamese = on;
+    }
+
+    /// Whether the buffer currently holds exactly one valid syllable-initial
+    /// consonant cluster and no vowels yet — the precondition for Quick
+    /// Vietnamese turning a following `w` into `ư`.
+    fn is_quick_initial(&self) -> bool {
+        if self.buffer.vowel_count() != 0 || self.buffer.is_empty() {
+            return false;
+        }
+        matches!(
+            self.buffer.text().to_lowercase().as_str(),
+            "b" | "c" | "d" | "đ" | "g" | "h" | "l" | "m" | "n" | "r" | "s" | "t" | "v" | "x"
+                | "ch" | "kh" | "ng" | "nh" | "ph" | "th" | "tr"
+        )
     }
 
     // MARK: - Letter Processing
@@ -432,10 +457,13 @@ impl TelexEngine {
         }
 
         // Standalone 'w' -> 'ư' when there's no target vowel to modify.
-        // Also allowed right after a syllable-initial đ ("ddw" -> "đư").
+        // Also allowed right after a syllable-initial đ ("ddw" -> "đư"), and —
+        // with Quick Vietnamese on — right after any valid initial consonant
+        // cluster ("tw" -> "tư", "chw" -> "chư").
         if key == 'w'
             && (self.buffer.is_empty()
-                || (self.buffer.has_dstroke && self.buffer.vowel_count() == 0))
+                || (self.buffer.has_dstroke && self.buffer.vowel_count() == 0)
+                || (self.quick_vietnamese && self.is_quick_initial()))
         {
             let vi_char = ViChar::with('u', VowelModifier::Horn, ToneMark::None, is_upper);
             self.buffer.append(vi_char);

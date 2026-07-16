@@ -31,6 +31,7 @@ pub const CMD_AUTOCOMPLETE: usize = 4;
 pub const CMD_QUIT: usize = 5;
 pub const CMD_SETTINGS: usize = 6;
 pub const CMD_PLAYSOUND: usize = 7;
+pub const CMD_QUICKVN: usize = 8;
 
 const TRAY_UID: u32 = 1;
 
@@ -84,16 +85,16 @@ fn set_tip(data: &mut NOTIFYICONDATAW, tip: &str) {
 
 /// Add the tray icon.
 pub fn add(hwnd: HWND, enabled: bool, hotkey: &str) {
-    let mut data = base_data(hwnd);
+    let mut data = base_data(hwnd, enabled);
     set_tip(&mut data, &tip_for(enabled, hotkey));
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &data);
     }
 }
 
-/// Update the tooltip to reflect the current on/off state and hotkey.
+/// Update the tooltip and icon to reflect the current on/off state and hotkey.
 pub fn update(hwnd: HWND, enabled: bool, hotkey: &str) {
-    let mut data = base_data(hwnd);
+    let mut data = base_data(hwnd, enabled);
     set_tip(&mut data, &tip_for(enabled, hotkey));
     unsafe {
         let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
