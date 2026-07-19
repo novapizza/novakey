@@ -80,6 +80,11 @@ pub fn reset_engine() {
     ENGINE.with(|e| e.borrow_mut().reset_session());
 }
 
+/// Enable/disable "Quick Vietnamese" on the engine (persists across resets).
+pub fn set_quick_vietnamese(on: bool) {
+    ENGINE.with(|e| e.borrow_mut().set_quick_vietnamese(on));
+}
+
 /// Low-level keyboard hook callback.
 pub unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code != HC_ACTION as i32 {

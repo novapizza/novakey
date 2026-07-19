@@ -67,6 +67,7 @@ unsafe fn run() {
     hook::set_enabled(loaded.enabled);
     hook::set_step_by_step(loaded.step_by_step);
     hook::set_fix_autocomplete(loaded.fix_browser_autocomplete);
+    hook::set_quick_vietnamese(loaded.quick_vietnamese);
 
     let hmodule = GetModuleHandleW(None).expect("GetModuleHandleW failed");
     let hinst = HINSTANCE(hmodule.0);
@@ -320,6 +321,15 @@ unsafe fn handle_command(hwnd: HWND, cmd: usize) {
                 s.play_sound = !s.play_sound;
                 s.save();
             });
+        }
+        tray::CMD_QUICKVN => {
+            let new = SETTINGS.with(|s| {
+                let mut s = s.borrow_mut();
+                s.quick_vietnamese = !s.quick_vietnamese;
+                s.save();
+                s.quick_vietnamese
+            });
+            hook::set_quick_vietnamese(new);
         }
         tray::CMD_AUTOSTART => {
             let new = SETTINGS.with(|s| {

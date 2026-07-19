@@ -48,6 +48,10 @@ pub struct TelexEngine {
     pub buffer: SyllableBuffer,
     /// Whether Vietnamese mode is active.
     pub is_vietnamese_mode: bool,
+    /// "Quick Vietnamese" (Windows-only): a lone `w` typed right after a valid
+    /// syllable-initial consonant (cluster) becomes `ư`, e.g. "tw" -> "tư",
+    /// "chw" -> "chư". Off by default; opted in from Settings.
+    pub quick_vietnamese: bool,
 
     /// The last raw (lowercase) key typed, for double-press detection.
     last_raw_key: Option<char>,
@@ -70,6 +74,7 @@ impl TelexEngine {
         TelexEngine {
             buffer: SyllableBuffer::new(),
             is_vietnamese_mode: true,
+            quick_vietnamese: false,
             last_raw_key: None,
             raw_keystrokes: String::new(),
             saved_buffer: None,
@@ -163,10 +168,36 @@ impl TelexEngine {
 
                 let ch = if shift { lower.to_ascii_uppercase() } else { lower };
 
+                // What is currently on screen, before this keystroke.
+                let screen_before = self.buffer.text();
                 // Record the raw keystroke (with original case) for restoration.
                 self.raw_keystrokes.push(ch);
 
-                self.process_letter(ch, shift)
+                let result = self.process_letter(ch, shift);
+
+                // Real-time English-word guard — part of Quick Vietnamese (kept
+                // off in default mode to preserve exact Swift-engine parity). If
+                // the composition is now a structurally invalid syllable carrying
+                // a diacritic that no longer matches the raw keys, abandon it and
+                // restore the literal keystrokes immediately — don't wait for the
+                // word break. e.g. "huawei": "hua"+w -> "hưa" (valid), +e ->
+                // "hưae" (invalid) -> restore "huawe", then +i -> "huawei".
+                // There is no "hưae…" syllable, so the horn was never intended.
+                // Because every prefix of a valid Vietnamese nucleus is itself
+                // valid, real Vietnamese words never hit this mid-word — only
+                // foreign/mixed input does. Runs here (not in process_letter) so
+                // it also covers the tone-key and d-key paths.
+                if self.quick_vietnamese
+                    && self.has_visible_transformation()
+                    && !is_valid_syllable(&self.buffer)
+                    && self.buffer.text() != self.raw_keystrokes
+                {
+                    let raw = self.raw_keystrokes.clone();
+                    self.rebuild_as_literal(&raw);
+                    return self.build_replacement(&screen_before, &raw);
+                }
+
+                result
             }
         }
     }
@@ -176,6 +207,26 @@ impl TelexEngine {
         self.buffer.reset();
         self.last_raw_key = None;
         self.raw_keystrokes.clear();
+    }
+
+    /// Enable/disable "Quick Vietnamese" (w-after-initial-consonant -> ư).
+    /// Persists across `reset_session`, so it survives word breaks.
+    pub fn set_quick_vietnamese(&mut self, on: bool) {
+        self.quick_vietnamese = on;
+    }
+
+    /// Whether the buffer currently holds exactly one valid syllable-initial
+    /// consonant cluster and no vowels yet — the precondition for Quick
+    /// Vietnamese turning a following `w` into `ư`.
+    fn is_quick_initial(&self) -> bool {
+        if self.buffer.vowel_count() != 0 || self.buffer.is_empty() {
+            return false;
+        }
+        matches!(
+            self.buffer.text().to_lowercase().as_str(),
+            "b" | "c" | "d" | "đ" | "g" | "h" | "l" | "m" | "n" | "r" | "s" | "t" | "v" | "x"
+                | "ch" | "kh" | "ng" | "nh" | "ph" | "th" | "tr"
+        )
     }
 
     // MARK: - Letter Processing
@@ -254,6 +305,31 @@ impl TelexEngine {
             return self.build_replacement(&pre_append_text, &self.buffer.text());
         }
         EngineResult::PassThrough
+    }
+
+    /// Whether any character carries a visible diacritic transformation (a vowel
+    /// modifier or a tone). A bare đ does not count — a vowel-less "đ" is a
+    /// legitimate standalone result.
+    fn has_visible_transformation(&self) -> bool {
+        self.buffer
+            .chars
+            .iter()
+            .any(|c| c.modifier != VowelModifier::Plain || c.tone != ToneMark::None)
+    }
+
+    /// Replace the buffer with the raw keystrokes as plain, unmodified letters,
+    /// so the remainder of the word is composed literally. Used by the inline
+    /// English-word guard once a transformation has proven to be a dead end.
+    fn rebuild_as_literal(&mut self, raw: &str) {
+        self.buffer.reset();
+        for c in raw.chars() {
+            self.buffer.append(ViChar::with(
+                c.to_ascii_lowercase(),
+                VowelModifier::Plain,
+                ToneMark::None,
+                c.is_ascii_uppercase(),
+            ));
+        }
     }
 
     // MARK: - Tone Handling
@@ -349,20 +425,52 @@ impl TelexEngine {
 
     /// Handle vowel modifier keys. Returns None if no modification can be applied.
     fn handle_vowel_modifier(&mut self, key: char, is_upper: bool) -> Option<EngineResult> {
-        // "ww" -> literal "w": first 'w' on empty buffer becomes 'ư' (standalone);
-        // pressing 'w' again reverts to literal 'w'.
-        if key == 'w'
-            && self.buffer.count() == 1
-            && self.buffer.chars[0].base == 'u'
-            && self.buffer.chars[0].modifier == VowelModifier::Horn
-            && self.raw_keystrokes.to_lowercase() == "ww"
-        {
-            let old_text = self.buffer.text();
-            self.buffer.reset();
-            self.buffer
-                .append(ViChar::with('w', VowelModifier::Plain, ToneMark::None, is_upper));
-            let new_text = self.buffer.text();
-            return Some(self.build_replacement(&old_text, &new_text));
+        // Escape hatch: a 'w' typed right after a 'ư' that was conjured from a
+        // *lone* 'w' (standalone `w`->`ư`, or Quick Vietnamese `<init>w`->`<init>ư`)
+        // reverts it to a literal 'w'. This keeps English/mixed fragments intact:
+        // "w"+w -> "w", "tw"+w -> "tw" — instead of leaking a spurious 'u' ("tuw").
+        if key == 'w' {
+            if let Some(last) = self.buffer.chars.last().copied() {
+                if last.base == 'u'
+                    && last.modifier == VowelModifier::Horn
+                    && last.tone == ToneMark::None
+                    && last.bare_w
+                {
+                    let old_text = self.buffer.text();
+                    self.buffer.remove_last();
+                    self.buffer
+                        .append(ViChar::with('w', VowelModifier::Plain, ToneMark::None, is_upper));
+                    let new_text = self.buffer.text();
+                    return Some(self.build_replacement(&old_text, &new_text));
+                }
+            }
+        }
+
+        // Escape: "ưa" + another 'w' reverts the horn, yielding literal "uaw".
+        // The horn-u here was conjured by the "ua"+w rule below; since there is
+        // no "ưă" syllable in Vietnamese, a 'w' at this point was never meant to
+        // breve the 'a' — it's the user undoing the horn (double-press style).
+        // e.g. "Huawei": "hua"+w -> "hưa", +w -> "huaw", then +e,+i -> "huawei".
+        if key == 'w' {
+            let n = self.buffer.chars.len();
+            if n >= 2 {
+                let a = self.buffer.chars[n - 1];
+                let u = self.buffer.chars[n - 2];
+                if a.base == 'a'
+                    && a.modifier == VowelModifier::Plain
+                    && a.tone == ToneMark::None
+                    && u.base == 'u'
+                    && u.modifier == VowelModifier::Horn
+                    && u.tone == ToneMark::None
+                {
+                    let old_text = self.buffer.text();
+                    self.buffer.remove_modifier(n - 2);
+                    self.buffer
+                        .append(ViChar::with('w', VowelModifier::Plain, ToneMark::None, is_upper));
+                    let new_text = self.buffer.text();
+                    return Some(self.build_replacement(&old_text, &new_text));
+                }
+            }
         }
 
         // Special case: "ua" + w -> "ưa" (horn on u, a stays plain).
@@ -432,12 +540,17 @@ impl TelexEngine {
         }
 
         // Standalone 'w' -> 'ư' when there's no target vowel to modify.
-        // Also allowed right after a syllable-initial đ ("ddw" -> "đư").
+        // Also allowed right after a syllable-initial đ ("ddw" -> "đư"), and —
+        // with Quick Vietnamese on — right after any valid initial consonant
+        // cluster ("tw" -> "tư", "chw" -> "chư").
         if key == 'w'
             && (self.buffer.is_empty()
-                || (self.buffer.has_dstroke && self.buffer.vowel_count() == 0))
+                || (self.buffer.has_dstroke && self.buffer.vowel_count() == 0)
+                || (self.quick_vietnamese && self.is_quick_initial()))
         {
-            let vi_char = ViChar::with('u', VowelModifier::Horn, ToneMark::None, is_upper);
+            let mut vi_char = ViChar::with('u', VowelModifier::Horn, ToneMark::None, is_upper);
+            // Mark it so a following 'w' can escape back to a literal 'w'.
+            vi_char.bare_w = true;
             self.buffer.append(vi_char);
             return Some(EngineResult::Replace {
                 backspaces: 0,
@@ -483,10 +596,7 @@ impl TelexEngine {
         // Only restore when a tone or vowel-modifier transformation is visible.
         // (đ deliberately does NOT count — it only fires syllable-initially and
         // a vowel-less "đ" is legitimate on its own.)
-        let has_transformation = self.buffer.chars.iter().any(|c| {
-            c.modifier != VowelModifier::Plain || c.tone != ToneMark::None
-        });
-        if !has_transformation {
+        if !self.has_visible_transformation() {
             return None;
         }
 

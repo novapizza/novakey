@@ -23,6 +23,8 @@ pub struct Settings {
     pub fix_browser_autocomplete: bool,
     /// Play a short system beep when the language is toggled.
     pub play_sound: bool,
+    /// "Quick Vietnamese": a lone `w` after an initial consonant -> ư.
+    pub quick_vietnamese: bool,
     /// Language-toggle hotkey modifier bitmask (`RegisterHotKey` MOD_* flags).
     pub hotkey_mods: u32,
     /// Language-toggle hotkey virtual-key code.
@@ -37,6 +39,7 @@ impl Default for Settings {
             start_with_windows: false,
             fix_browser_autocomplete: true,
             play_sound: false,
+            quick_vietnamese: false,
             hotkey_mods: hotkey::DEFAULT_MODS,
             hotkey_vk: hotkey::DEFAULT_VK,
         }
@@ -64,6 +67,8 @@ impl Settings {
                 s.fix_browser_autocomplete = read_bool(&text, "fixBrowserAutocomplete")
                     .unwrap_or(s.fix_browser_autocomplete);
                 s.play_sound = read_bool(&text, "playSound").unwrap_or(s.play_sound);
+                s.quick_vietnamese =
+                    read_bool(&text, "quickVietnamese").unwrap_or(s.quick_vietnamese);
                 s.hotkey_mods = read_u32(&text, "hotkeyMods").unwrap_or(s.hotkey_mods);
                 s.hotkey_vk = read_u32(&text, "hotkeyVk").unwrap_or(s.hotkey_vk);
             }
@@ -77,12 +82,13 @@ impl Settings {
                 let _ = fs::create_dir_all(dir);
             }
             let json = format!(
-                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {},\n  \"playSound\": {},\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {}\n}}\n",
+                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {},\n  \"playSound\": {},\n  \"quickVietnamese\": {},\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {}\n}}\n",
                 self.enabled,
                 self.step_by_step,
                 self.start_with_windows,
                 self.fix_browser_autocomplete,
                 self.play_sound,
+                self.quick_vietnamese,
                 self.hotkey_mods,
                 self.hotkey_vk
             );

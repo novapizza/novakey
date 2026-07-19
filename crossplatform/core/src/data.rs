@@ -70,6 +70,11 @@ pub struct ViChar {
     /// explicit 'w'. Lets a subsequent redundant 'w' confirm the horn instead
     /// of undoing it. Windows-only enhancement; not present in the Swift engine.
     pub auto_horn: bool,
+    /// Whether this 'ư' was conjured from a *lone* 'w' (standalone `w`->`ư`, or
+    /// Quick Vietnamese `<initial>w`->`<initial>ư`) with no real 'u' typed.
+    /// A following 'w' then reverts it to a literal 'w' ("tw"+w -> "tw") instead
+    /// of leaking a spurious 'u' ("tuw"). Windows-only; not in the Swift engine.
+    pub bare_w: bool,
 }
 
 impl ViChar {
@@ -81,6 +86,7 @@ impl ViChar {
             is_upper: false,
             has_dstroke: false,
             auto_horn: false,
+            bare_w: false,
         }
     }
 
@@ -92,6 +98,7 @@ impl ViChar {
             is_upper,
             has_dstroke: false,
             auto_horn: false,
+            bare_w: false,
         }
     }
 
