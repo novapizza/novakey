@@ -112,6 +112,25 @@ fn standalone_double_w_still_escapes() {
     assert_eq!(typ("ww", false), "w");
 }
 
+// --- "ưa" + w escapes to literal "uaw" (there is no "ưă" syllable) ---
+
+#[test]
+fn ua_horn_plus_w_reverts_to_literal_uaw() {
+    // "uaw" -> "ưa" (horn on u); a further 'w' undoes the horn -> "uaw",
+    // NOT the invalid "ưă". Applies in both modes.
+    assert_eq!(typ("uaww", true), "uaw");
+    assert_eq!(typ("uaww", false), "uaw");
+    assert_eq!(typ("huaww", true), "huaw");
+    assert_eq!(typ("huaww", false), "huaw");
+}
+
+#[test]
+fn huawei_composes_literally() {
+    // With Quick Vietnamese on, the English guard finishes the job:
+    // "hua"+w -> "hưa", +w -> "huaw", +e,+i -> "huawei".
+    assert_eq!(typ("Huawei", true), "Huawei");
+}
+
 #[test]
 fn real_uw_double_w_still_reverts_the_u() {
     // A ư from a *real* "uw" (u was typed) reverts to "u"+"w", unchanged:

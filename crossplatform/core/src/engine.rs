@@ -446,6 +446,33 @@ impl TelexEngine {
             }
         }
 
+        // Escape: "ưa" + another 'w' reverts the horn, yielding literal "uaw".
+        // The horn-u here was conjured by the "ua"+w rule below; since there is
+        // no "ưă" syllable in Vietnamese, a 'w' at this point was never meant to
+        // breve the 'a' — it's the user undoing the horn (double-press style).
+        // e.g. "Huawei": "hua"+w -> "hưa", +w -> "huaw", then +e,+i -> "huawei".
+        if key == 'w' {
+            let n = self.buffer.chars.len();
+            if n >= 2 {
+                let a = self.buffer.chars[n - 1];
+                let u = self.buffer.chars[n - 2];
+                if a.base == 'a'
+                    && a.modifier == VowelModifier::Plain
+                    && a.tone == ToneMark::None
+                    && u.base == 'u'
+                    && u.modifier == VowelModifier::Horn
+                    && u.tone == ToneMark::None
+                {
+                    let old_text = self.buffer.text();
+                    self.buffer.remove_modifier(n - 2);
+                    self.buffer
+                        .append(ViChar::with('w', VowelModifier::Plain, ToneMark::None, is_upper));
+                    let new_text = self.buffer.text();
+                    return Some(self.build_replacement(&old_text, &new_text));
+                }
+            }
+        }
+
         // Special case: "ua" + w -> "ưa" (horn on u, a stays plain).
         if key == 'w' && is_valid_syllable(&self.buffer) {
             if let Some(a_idx) = self.buffer.last_index_of_base('a') {
