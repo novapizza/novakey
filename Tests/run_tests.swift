@@ -118,6 +118,20 @@ func typeThenSpace(_ chars: String) -> (space: EngineResult, composed: String) {
     return (result, composed)
 }
 
+/// Type a sequence of letters with Quick Vietnamese optionally enabled.
+func typeQuick(_ chars: String, quick: Bool) -> String {
+    let engine = TelexEngine()
+    engine.isVietnameseMode = true
+    engine.quickVietnamese = quick
+    for char in chars {
+        let lower = char.lowercased().first!
+        let isShift = char.isUppercase
+        let keyCode = keyCodeFor(lower)
+        _ = engine.processKey(keyCode: keyCode, isShift: isShift)
+    }
+    return engine.buffer.text
+}
+
 // ============================================================
 // Main entry point
 // ============================================================
@@ -748,6 +762,116 @@ test("correction (2 r's) + space -> 'corection' (known n-press limit, no restore
     let (result, composed) = typeThenSpace("correction")
     try expect(composed, "corection")
     try expect(result, EngineResult.wordBreak)
+}
+
+// ============================================================
+// Quick Vietnamese (opt-in: w after an initial consonant -> ư)
+// ============================================================
+print("\n--- Quick Vietnamese ---")
+
+let uHorn = "\u{01B0}" // ư
+
+test("QV: single-consonant initials -> ư") {
+    for initc in ["b", "c", "d", "g", "h", "l", "m", "n", "r", "s", "t", "v", "x"] {
+        try expect(typeQuick("\(initc)w", quick: true), "\(initc)\(uHorn)")
+    }
+}
+
+test("QV: digraph/trigraph initials -> ư") {
+    for initc in ["ch", "kh", "ng", "nh", "ph", "th", "tr"] {
+        try expect(typeQuick("\(initc)w", quick: true), "\(initc)\(uHorn)")
+    }
+}
+
+test("QV: d-stroke initials (dw -> dư, ddw -> đư)") {
+    try expect(typeQuick("dw", quick: true), "d\(uHorn)")
+    try expect(typeQuick("ddw", quick: true), "\u{0111}\(uHorn)") // đư
+}
+
+test("QV: preserves uppercase initial (Tw -> Tư)") {
+    try expect(typeQuick("Tw", quick: true), "T\(uHorn)")
+}
+
+test("QV: composes a full word (twowng -> tương)") {
+    try expect(typeQuick("twowng", quick: true), "t\(uHorn)\u{01A1}ng") // tương
+}
+
+test("QV off by default leaves tw / chw literal") {
+    try expect(typeQuick("tw", quick: false), "tw")
+    try expect(typeQuick("chw", quick: false), "chw")
+}
+
+test("QV: only listed initials trigger (kw, pw stay literal)") {
+    try expect(typeQuick("kw", quick: true), "kw")
+    try expect(typeQuick("pw", quick: true), "pw")
+}
+
+test("QV: standalone w still becomes ư") {
+    try expect(typeQuick("w", quick: true), uHorn)
+}
+
+test("QV: uw after vowel unchanged (tuw -> tư)") {
+    try expect(typeQuick("tuw", quick: true), "t\(uHorn)")
+    try expect(typeQuick("tuw", quick: false), "t\(uHorn)")
+}
+
+test("QV: double-w escapes conjured ư to literal (tww -> tw)") {
+    try expect(typeQuick("tww", quick: true), "tw")
+    try expect(typeQuick("chww", quick: true), "chw")
+    try expect(typeQuick("sww", quick: true), "sw")
+    try expect(typeQuick("ngww", quick: true), "ngw")
+}
+
+test("QV: standalone double-w still escapes (ww -> w) both modes") {
+    try expect(typeQuick("ww", quick: true), "w")
+    try expect(typeQuick("ww", quick: false), "w")
+}
+
+test("QV: real uw double-w still reverts the u (tuww -> tuw)") {
+    try expect(typeQuick("tuww", quick: true), "tuw")
+}
+
+// ============================================================
+// "Huawei" fix: ưa + w reverts to literal "uaw" (both modes)
+// ============================================================
+print("\n--- Huawei / ưa+w revert ---")
+
+test("uaww -> uaw (no ưă syllable) both modes") {
+    try expect(typeQuick("uaww", quick: true), "uaw")
+    try expect(typeQuick("uaww", quick: false), "uaw")
+    try expect(typeQuick("huaww", quick: true), "huaw")
+    try expect(typeQuick("huaww", quick: false), "huaw")
+}
+
+test("Huawei composes literally (QV on)") {
+    try expect(typeQuick("Huawei", quick: true), "Huawei")
+}
+
+// ============================================================
+// Real-time English-word guard (Quick Vietnamese only)
+// ============================================================
+print("\n--- English-word guard ---")
+
+test("guard: huawei stays literal mid-word (QV on)") {
+    try expect(typeQuick("huawei", quick: true), "huawei")
+}
+
+test("guard: other mixed words stay literal (QV on)") {
+    try expect(typeQuick("await", quick: true), "await")
+    try expect(typeQuick("sword", quick: true), "sword")
+    try expect(typeQuick("nuance", quick: true), "nuance")
+}
+
+test("guard: default mode keeps legacy mid-word (huawei -> hưaei)") {
+    try expect(typeQuick("huawei", quick: false), "h\(uHorn)aei") // hưaei
+}
+
+test("guard: genuine Vietnamese words unaffected (QV on)") {
+    try expect(typeQuick("muaw", quick: true), "m\(uHorn)a")       // mưa
+    try expect(typeQuick("huaws", quick: true), "h\u{1EE9}a")      // hứa
+    try expect(typeQuick("thuwowng", quick: true), "th\(uHorn)\u{01A1}ng") // thương
+    try expect(typeQuick("chuaw", quick: true), "ch\(uHorn)a")     // chưa
+    try expect(typeQuick("xuaw", quick: true), "x\(uHorn)a")       // xưa
 }
 
 } // end runAllTests()

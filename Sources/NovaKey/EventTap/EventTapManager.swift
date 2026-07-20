@@ -23,6 +23,12 @@ final class EventTapManager {
     var toggleHotkeyKeyCode: UInt16 = KeyCode.z.rawValue
     var toggleHotkeyModifiers: CGEventFlags = .maskAlternate  // Option+Z
 
+    /// Whether the Fn (Globe) key toggles Vietnamese/English mode.
+    var switchWithFnKey: Bool = true
+
+    /// Tracks Fn-key press state so we only toggle on the down edge.
+    private var fnKeyWasDown = false
+
     init?(engine: TelexEngine) {
         guard let srcMgr = EventSourceManager() else {
             Log.error("Failed to create CGEventSource")
@@ -159,6 +165,26 @@ final class EventTapManager {
             return passThrough
         }
 
+        // Fn (Globe) key: toggle mode on the down edge so NovaKey stays in
+        // sync with the system language switch. We never suppress the event —
+        // the system's own Globe behavior (if any) still runs.
+        if type == .flagsChanged {
+            let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+            if keyCode == KeyCode.function.rawValue {
+                let fnDown = event.flags.contains(.maskSecondaryFn)
+                if fnDown && !fnKeyWasDown {
+                    fnKeyWasDown = true
+                    if switchWithFnKey {
+                        Log.info("Fn key language switch detected")
+                        toggleMode()
+                    }
+                } else if !fnDown {
+                    fnKeyWasDown = false
+                }
+            }
+            return passThrough
+        }
+
         // Only process key-down events for the engine
         guard type == .keyDown else {
             return passThrough
@@ -180,9 +206,7 @@ final class EventTapManager {
         // Check for hotkey toggle (Option+Z by default)
         if isToggleHotkey(keyCode: keyCode, flags: flags) {
             Log.info("HOTKEY TOGGLE detected")
-            engine.isVietnameseMode.toggle()
-            engine.resetSession()
-            onModeChanged?(engine.isVietnameseMode)
+            toggleMode()
             return nil // Suppress the hotkey event
         }
 
@@ -214,6 +238,15 @@ final class EventTapManager {
             keySender.execute(result: .replace(backspaces: bs, text: text), proxy: proxy)
             return passThrough
         }
+    }
+
+    // MARK: - Mode Toggle
+
+    /// Flip Vietnamese/English mode, reset the syllable buffer, and notify the UI.
+    private func toggleMode() {
+        engine.isVietnameseMode.toggle()
+        engine.resetSession()
+        onModeChanged?(engine.isVietnameseMode)
     }
 
     // MARK: - Hotkey Detection

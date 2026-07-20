@@ -3,7 +3,7 @@ import Foundation
 enum AppConstants {
     static let bundleIdentifier = "com.novakey.inputmethod"
     static let appName = "NovaKey"
-    static let version = "1.0.0"
+    static let version = "0.2.1"
 
     // UserDefaults keys
     enum Defaults {
@@ -14,5 +14,7 @@ enum AppConstants {
         static let sendKeyStepByStep = "NovaKey.sendKeyStepByStep"
         static let launchAtLogin = "NovaKey.launchAtLogin"
         static let playSoundOnSwitch = "NovaKey.playSoundOnSwitch"
+        static let switchWithFnKey = "NovaKey.switchWithFnKey"
+        static let quickVietnamese = "NovaKey.quickVietnamese"
     }
 }
