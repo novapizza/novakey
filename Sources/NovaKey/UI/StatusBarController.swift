@@ -136,6 +136,8 @@ struct MenuBarPopoverView: View {
     let onQuit: () -> Void
 
     @State private var isVietnamese: Bool = AppSettings.shared.isVietnameseMode
+    @State private var hotkeyText: String = HotkeyManager.currentDescription
+    @State private var fnEnabled: Bool = AppSettings.shared.switchWithFnKey
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -148,6 +150,10 @@ struct MenuBarPopoverView: View {
         .frame(width: 280)
         .onReceive(NotificationCenter.default.publisher(for: .novaKeyModeChanged)) { note in
             if let v = note.userInfo?["isVietnamese"] as? Bool { isVietnamese = v }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .novaKeySettingsChanged)) { _ in
+            hotkeyText = HotkeyManager.currentDescription
+            fnEnabled = AppSettings.shared.switchWithFnKey
         }
     }
 
@@ -181,9 +187,9 @@ struct MenuBarPopoverView: View {
                     .onTapGesture { if isVietnamese { onToggleMode() } }
             }
             HStack(spacing: 6) {
-                Image(systemName: "command")
+                Image(systemName: "keyboard")
                     .font(.system(size: 10, weight: .semibold))
-                Text("\(HotkeyManager.currentDescription) to toggle")
+                Text(fnEnabled ? "\(hotkeyText) or Fn to toggle" : "\(hotkeyText) to toggle")
                     .font(.system(size: 11))
             }
             .foregroundStyle(.white.opacity(0.45))

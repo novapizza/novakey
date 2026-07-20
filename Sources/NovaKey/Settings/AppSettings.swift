@@ -36,6 +36,21 @@ final class AppSettings {
         set { defaults.set(newValue, forKey: AppConstants.Defaults.playSoundOnSwitch) }
     }
 
+    /// Whether pressing the Fn (Globe) key toggles Vietnamese/English mode,
+    /// keeping NovaKey in sync with the system language switch. Defaults to true.
+    var switchWithFnKey: Bool {
+        get { defaults.object(forKey: AppConstants.Defaults.switchWithFnKey) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: AppConstants.Defaults.switchWithFnKey) }
+    }
+
+    /// Whether "Quick Vietnamese" is enabled: a lone `w` right after an initial
+    /// consonant becomes `ư` (e.g. "tw" -> "tư"), plus a real-time revert of
+    /// invalid mid-word transformations. Off by default.
+    var quickVietnamese: Bool {
+        get { defaults.bool(forKey: AppConstants.Defaults.quickVietnamese) }
+        set { defaults.set(newValue, forKey: AppConstants.Defaults.quickVietnamese) }
+    }
+
     /// Hotkey keycode for toggling Vietnamese/English.
     var toggleHotkeyKeyCode: UInt16 {
         get {
@@ -62,6 +77,7 @@ final class AppSettings {
             AppConstants.Defaults.isVietnameseMode: true,
             AppConstants.Defaults.fixBrowserAutocomplete: true,
             AppConstants.Defaults.sendKeyStepByStep: true,
+            AppConstants.Defaults.switchWithFnKey: true,
         ])
     }
 }

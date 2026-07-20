@@ -38,13 +38,19 @@ struct ViChar: Equatable {
     var tone: ToneMark
     var isUpperCase: Bool
     var hasDStroke: Bool      // Whether this 'd' has been converted to 'đ'
+    /// Whether this 'ư' was conjured from a *lone* 'w' (standalone `w`->`ư`, or
+    /// Quick Vietnamese `<initial>w`->`ư`) with no real 'u' typed. A following
+    /// 'w' then reverts it to a literal 'w' ("tw"+w -> "tw") instead of leaking
+    /// a spurious 'u' ("tuw").
+    var bareW: Bool
 
-    init(base: Character, modifier: VowelModifier = .none, tone: ToneMark = .none, isUpperCase: Bool = false, hasDStroke: Bool = false) {
+    init(base: Character, modifier: VowelModifier = .none, tone: ToneMark = .none, isUpperCase: Bool = false, hasDStroke: Bool = false, bareW: Bool = false) {
         self.base = base
         self.modifier = modifier
         self.tone = tone
         self.isUpperCase = isUpperCase
         self.hasDStroke = hasDStroke
+        self.bareW = bareW
     }
 
     /// Resolve this ViChar to its Unicode character.

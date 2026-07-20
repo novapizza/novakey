@@ -40,6 +40,13 @@ final class TelexEngine {
     /// Whether Vietnamese mode is active.
     var isVietnameseMode: Bool = true
 
+    /// "Quick Vietnamese" (opt-in): a lone `w` typed right after a valid
+    /// syllable-initial consonant (cluster) becomes `ư`, e.g. "tw" -> "tư",
+    /// "chw" -> "chư". Also turns on a real-time English-word guard that reverts
+    /// invalid mid-word transformations to literal keystrokes. Off by default;
+    /// mirrors the Windows port.
+    var quickVietnamese: Bool = false
+
     /// The last raw key that was typed (for double-press detection).
     private var lastRawKey: Character? = nil
 
@@ -143,11 +150,35 @@ final class TelexEngine {
 
         let char = isShift ? Character(ascii.uppercased()) : ascii
 
+        // What is currently on screen, before this keystroke.
+        let screenBefore = buffer.text
+
         // Record the raw keystroke (with original case) for potential
         // restoration on word-break if the syllable is invalid.
         rawKeystrokes.append(char)
 
-        return processLetter(char, isUpperCase: isShift)
+        let result = processLetter(char, isUpperCase: isShift)
+
+        // Real-time English-word guard -- part of Quick Vietnamese (kept off in
+        // default mode to preserve exact legacy behavior). If the composition is
+        // now a structurally invalid syllable carrying a diacritic that no longer
+        // matches the raw keys, abandon it and restore the literal keystrokes
+        // immediately -- don't wait for the word break. e.g. "huawei": "hua"+w
+        // -> "hưa" (valid), +e -> "hưae" (invalid) -> restore "huawe", then +i
+        // -> "huawei". Because every prefix of a valid Vietnamese nucleus is
+        // itself valid, real Vietnamese words never hit this mid-word; only
+        // foreign/mixed input does. Runs here (not in processLetter) so it also
+        // covers the tone-key and d-key paths.
+        if quickVietnamese,
+           hasVisibleTransformation(),
+           !SpellingChecker.isValidSyllable(buffer),
+           buffer.text != rawKeystrokes {
+            let raw = rawKeystrokes
+            rebuildAsLiteral(raw)
+            return buildReplacement(oldText: screenBefore, newText: raw)
+        }
+
+        return result
     }
 
     /// Reset the syllable buffer and start fresh.
@@ -155,6 +186,40 @@ final class TelexEngine {
         buffer.reset()
         lastRawKey = nil
         rawKeystrokes = ""
+    }
+
+    // MARK: - Quick Vietnamese Helpers
+
+    /// Whether the buffer currently holds exactly one valid syllable-initial
+    /// consonant cluster and no vowels yet -- the precondition for Quick
+    /// Vietnamese turning a following `w` into `ư`.
+    private func isQuickInitial() -> Bool {
+        guard buffer.vowelCount == 0, !buffer.isEmpty else { return false }
+        switch buffer.text.lowercased() {
+        case "b", "c", "d", "đ", "g", "h", "l", "m", "n", "r", "s", "t", "v", "x",
+             "ch", "kh", "ng", "nh", "ph", "th", "tr":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Whether any character carries a visible diacritic transformation (a vowel
+    /// modifier or a tone). A bare đ does not count -- a vowel-less "đ" is a
+    /// legitimate standalone result.
+    private func hasVisibleTransformation() -> Bool {
+        buffer.chars.contains { $0.modifier != .none || $0.tone != .none }
+    }
+
+    /// Replace the buffer with the raw keystrokes as plain, unmodified letters,
+    /// so the remainder of the word is composed literally. Used by the inline
+    /// English-word guard once a transformation has proven to be a dead end.
+    private func rebuildAsLiteral(_ raw: String) {
+        buffer.reset()
+        for c in raw {
+            let lower = c.lowercased().first ?? c
+            buffer.append(ViChar(base: lower, isUpperCase: c.isUppercase))
+        }
     }
 
     // MARK: - Letter Processing
@@ -325,20 +390,39 @@ final class TelexEngine {
     /// Handle vowel modifier keys (aa->â, ee->ê, oo->ô, aw->ă, ow->ơ, uw->ư, w standalone).
     /// Returns nil if no modification can be applied.
     private func handleVowelModifier(_ key: Character, isUpperCase: Bool) -> EngineResult? {
-        // "ww" -> literal "w": the first 'w' on an empty buffer becomes 'ư'
-        // (standalone rule); pressing 'w' again in that state should revert
-        // to literal 'w', not 'uw'. Guarded by rawKeystrokes == "ww" to
-        // distinguish the standalone path from the 'u' + 'w' + 'w' path.
-        if key == "w"
-            && buffer.count == 1
-            && buffer.chars[0].base == "u"
-            && buffer.chars[0].modifier == .horn
-            && rawKeystrokes.lowercased() == "ww" {
+        // Escape hatch: a 'w' typed right after a 'ư' that was conjured from a
+        // *lone* 'w' (standalone `w`->`ư`, or Quick Vietnamese `<init>w`->`ư`)
+        // reverts it to a literal 'w'. Keeps English/mixed fragments intact:
+        // "w"+w -> "w", "tw"+w -> "tw" -- instead of leaking a spurious 'u'
+        // ("tuw"). A ư from a real "uw" (u actually typed) is unaffected and
+        // still reverts to "u"+"w". Provenance-based via the bareW flag, this
+        // subsumes the old rawKeystrokes == "ww" special case.
+        if key == "w", let last = buffer.chars.last,
+           last.base == "u", last.modifier == .horn, last.tone == .none, last.bareW {
             let oldText = buffer.text
-            buffer.reset()
+            buffer.removeLast()
             buffer.append(ViChar(base: "w", isUpperCase: isUpperCase))
             let newText = buffer.text
             return buildReplacement(oldText: oldText, newText: newText)
+        }
+
+        // Escape: "ưa" + another 'w' reverts the horn, yielding literal "uaw".
+        // The horn-u here was conjured by the "ua"+w rule below; since there is
+        // no "ưă" syllable in Vietnamese, a 'w' at this point was never meant to
+        // breve the 'a' -- it's the user undoing the horn (double-press style).
+        // e.g. "Huawei": "hua"+w -> "hưa", +w -> "huaw", then +e,+i -> "huawei".
+        if key == "w", buffer.count >= 2 {
+            let n = buffer.count
+            let a = buffer.chars[n - 1]
+            let u = buffer.chars[n - 2]
+            if a.base == "a", a.modifier == .none, a.tone == .none,
+               u.base == "u", u.modifier == .horn, u.tone == .none {
+                let oldText = buffer.text
+                buffer.removeModifier(at: n - 2)
+                buffer.append(ViChar(base: "w", isUpperCase: isUpperCase))
+                let newText = buffer.text
+                return buildReplacement(oldText: oldText, newText: newText)
+            }
         }
 
         // Special case: "ua" + w -> "ưa" (horn on u, a stays plain).
@@ -403,9 +487,13 @@ final class TelexEngine {
         // Also allowed right after a syllable-initial đ ("ddw" -> "đư", so
         // "ddwowngf" -> "đường"). đ never occurs in English words, so this
         // cannot misfire -- unlike a general consonant+w rule, which would
-        // wreck words like "swift".
-        if key == "w" && (buffer.isEmpty || (buffer.hasDStroke && buffer.vowelCount == 0)) {
-            let viChar = ViChar(base: "u", modifier: .horn, isUpperCase: isUpperCase)
+        // wreck words like "swift". With Quick Vietnamese on, it also fires
+        // right after any valid initial consonant cluster ("tw" -> "tư").
+        if key == "w" && (buffer.isEmpty
+            || (buffer.hasDStroke && buffer.vowelCount == 0)
+            || (quickVietnamese && isQuickInitial())) {
+            // Mark it so a following 'w' can escape back to a literal 'w'.
+            let viChar = ViChar(base: "u", modifier: .horn, isUpperCase: isUpperCase, bareW: true)
             buffer.append(viChar)
             // Replace the 'w' keystroke with 'ư'
             return .replace(backspaces: 0, text: String(viChar.unicode))
@@ -464,10 +552,7 @@ final class TelexEngine {
         // đ deliberately does NOT count: dd -> đ only fires syllable-
         // initially, so it can't happen by accident, and a vowel-less "đ"
         // is legitimate on its own (currency "50.000đ", shorthand "đc").
-        let hasTransformation = buffer.chars.contains {
-            $0.modifier != .none || $0.tone != .none
-        }
-        guard hasTransformation else { return nil }
+        guard hasVisibleTransformation() else { return nil }
 
         // Don't restore if the syllable is structurally valid.
         if SpellingChecker.isValidSyllable(buffer) { return nil }

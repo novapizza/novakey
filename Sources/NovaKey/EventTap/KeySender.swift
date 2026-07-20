@@ -23,6 +23,14 @@ final class KeySender {
     /// written on the main thread, so no synchronization is needed.
     var browserKind: BrowserKind = .none
 
+    /// Whether the frontmost app's input field repaints on every discrete
+    /// synthetic event (e.g. Telegram Desktop's Qt composer), making the
+    /// backspace-and-retype burst flicker. When true, we let macOS coalesce
+    /// the burst and always insert text as one batch event, trading a little
+    /// fast-typing robustness for far fewer visible repaints. Same threading
+    /// contract as `browserKind`.
+    var reduceFlicker: Bool = false
+
     init(sourceManager: EventSourceManager) {
         self.sourceManager = sourceManager
     }
@@ -90,8 +98,10 @@ final class KeySender {
             // one text change — any completion lands after the batch, where
             // the next replacement's guard or the user's next real keystroke
             // handles it, exactly like normal typing.
+            // Flicker-prone apps additionally force the batch path: one event
+            // = one text change = one repaint of the composer.
             if !text.isEmpty {
-                if stepByStepMode && !guardAutocomplete {
+                if stepByStepMode && !guardAutocomplete && !reduceFlicker {
                     sendTextStepByStep(text, proxy: proxy)
                 } else {
                     sendTextBatch(text, proxy: proxy)
@@ -106,7 +116,13 @@ final class KeySender {
     /// rapidly-fired synthetic events. Without this, fast typing can cause the
     /// OS to merge or drop our backspaces / character events, producing
     /// duplicated or missing letters.
+    ///
+    /// Exception: in flicker-prone apps (`reduceFlicker`), discrete delivery
+    /// is what causes the visible flashing — every event triggers a full
+    /// composer repaint — so there we leave the flag off and accept the
+    /// coalescing risk.
     private func markNonCoalesced(_ event: CGEvent) {
+        guard !reduceFlicker else { return }
         event.flags = event.flags.union(.maskNonCoalesced)
     }
 

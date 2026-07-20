@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Initialize engine
         engine = TelexEngine()
         engine.isVietnameseMode = AppSettings.shared.isVietnameseMode
+        engine.quickVietnamese = AppSettings.shared.quickVietnamese
         Log.info("Engine initialized, Vietnamese mode: \(engine.isVietnameseMode)")
 
         // Initialize event tap
@@ -77,8 +78,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         browserWatcher.onChange = { [weak self] kind in
             self?.eventTapManager.keySender.browserKind = kind
         }
+        browserWatcher.onFlickerProneChange = { [weak self] prone in
+            self?.eventTapManager.keySender.reduceFlicker = prone
+        }
         browserWatcher.start()
         eventTapManager.keySender.browserKind = browserWatcher.kind
+        eventTapManager.keySender.reduceFlicker = browserWatcher.isFlickerProne
 
         // Start event tap
         startEventTap()
@@ -138,6 +143,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         eventTapManager.keySender.stepByStepMode = settings.sendKeyStepByStep
         eventTapManager.toggleHotkeyKeyCode = settings.toggleHotkeyKeyCode
         eventTapManager.toggleHotkeyModifiers = CGEventFlags(rawValue: settings.toggleHotkeyModifiers)
+        eventTapManager.switchWithFnKey = settings.switchWithFnKey
+        engine.quickVietnamese = settings.quickVietnamese
     }
 
     private func showSettings() {
