@@ -13,10 +13,13 @@ Fast, lightweight (228KB), compatible with browsers, terminals, and all macOS ap
 - **Smart tone placement** -- modern Vietnamese orthographic rules (e.g., `hoang` + `f` places tone on `a`, not `o`)
 - **English-word protection** -- Telex transforms are gated on structural syllable validity, so `class`, `know`, and `add` stay literal instead of turning into Vietnamese
 - **Double-press escape / n+1 typing** -- typing a Telex key twice trusts the second press unconditionally, so `disst` → `dist`, `noww` → `now`, `corrrection` → `correction`
+- **Quick Vietnamese (opt-in)** -- a lone `w` after an initial consonant becomes `ư` (e.g. `tw` → `tư`), with real-time revert so mixed English words like `huawei` stay literal
 - **Menu bar app** -- runs as a status bar icon (V/E), no dock icon
 - **Browser autocomplete fix** -- probes the focused field's selection to compensate for inline URL-bar suggestions, avoiding backspace miscounts
 - **Sleep/wake recovery** -- automatically restarts event tap after system sleep
-- **Option+Z** to toggle Vietnamese/English mode
+- **Customizable toggle hotkey** -- defaults to `Option+Z`; rebindable in Settings
+- **Fn (Globe) key switching** -- optionally follow the system language switch via the Fn/Globe key
+- **Launch at login** and an optional **switch sound**
 
 ## Requirements
 
@@ -149,11 +152,22 @@ The menu bar will show **V** (Vietnamese mode) or **E** (English mode).
 
 | Shortcut | Action |
 |----------|--------|
-| `Option+Z` | Toggle Vietnamese/English mode |
+| `Option+Z` | Toggle Vietnamese/English mode (default -- rebindable in Settings) |
 
 ### Settings
 
 Click the **V/E** icon in the menu bar > **Settings** to configure:
+
+**Input Method**
+- **Toggle hotkey** -- record your own shortcut for Vietnamese/English switching
+- **Quick Vietnamese** -- off by default; a lone `w` after a consonant becomes `ư` (e.g. `tw` → `tư`), while mixed words like `huawei` stay literal
+
+**General**
+- **Launch at login** -- start NovaKey automatically
+- **Play sound on switch** -- audible cue when toggling modes
+- **Switch with Fn (Globe) key** -- on by default; follow the system language switch
+
+**Compatibility**
 - **Fix browser autocomplete** -- on by default, helps with Chrome/Safari URL bars
 - **Send keys step-by-step** -- off by default, enable if you see garbled output in specific apps
 
