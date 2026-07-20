@@ -1,5 +1,7 @@
 # NovaKey
 
+[English](README.md)
+
 Bộ gõ tiếng Việt cho macOS sử dụng kỹ thuật backspace.
 
 Nhanh, nhẹ (228KB), tương thích với trình duyệt, terminal và mọi ứng dụng macOS.
@@ -11,10 +13,13 @@ Nhanh, nhẹ (228KB), tương thích với trình duyệt, terminal và mọi �
 - **Đặt dấu thông minh** -- theo quy tắc chính tả tiếng Việt hiện đại (ví dụ: `hoang` + `f` đặt dấu trên `a`, không phải `o`)
 - **Bảo vệ từ tiếng Anh** -- các biến đổi Telex chỉ áp dụng khi âm tiết hợp lệ về cấu trúc, nên `class`, `know`, `add` giữ nguyên thay vì bị biến thành tiếng Việt
 - **Nhấn đúp escape / gõ n+1** -- gõ một phím Telex hai lần sẽ tin tưởng lần nhấn thứ hai vô điều kiện, nên `disst` → `dist`, `noww` → `now`, `corrrection` → `correction`
+- **Gõ tiếng Việt nhanh (tùy chọn)** -- một chữ `w` đứng sau phụ âm đầu sẽ thành `ư` (ví dụ: `tw` → `tư`), có hoàn tác thời gian thực nên các từ tiếng Anh lẫn lộn như `huawei` vẫn giữ nguyên
 - **Ứng dụng thanh menu** -- chạy dưới dạng biểu tượng trên thanh trạng thái (V/E), không hiện trên Dock
 - **Sửa lỗi autocomplete trình duyệt** -- dò vùng chọn của ô nhập đang focus để bù cho gợi ý nội tuyến ở thanh địa chỉ, tránh đếm sai số backspace
 - **Tự phục hồi sau sleep/wake** -- tự động khởi động lại event tap sau khi máy ngủ
-- **Option+Z** để chuyển đổi giữa chế độ Việt/Anh
+- **Phím tắt chuyển đổi tùy chỉnh** -- mặc định `Option+Z`; có thể đặt lại trong Cài đặt
+- **Chuyển bằng phím Fn (Globe)** -- tùy chọn đồng bộ với nút chuyển ngôn ngữ của hệ thống qua phím Fn/Globe
+- **Khởi động cùng đăng nhập** và **âm thanh khi chuyển** (tùy chọn)
 
 ## Yêu cầu hệ thống
 
@@ -73,11 +78,22 @@ Thanh menu sẽ hiển thị **V** (chế độ tiếng Việt) hoặc **E** (ch
 
 | Phím tắt | Chức năng |
 |----------|-----------|
-| `Option+Z` | Chuyển đổi chế độ Việt/Anh |
+| `Option+Z` | Chuyển đổi chế độ Việt/Anh (mặc định -- có thể đặt lại trong Cài đặt) |
 
 ### Cài đặt
 
 Nhấn vào biểu tượng **V/E** trên thanh menu > **Settings** để cấu hình:
+
+**Input Method**
+- **Toggle hotkey** -- ghi lại phím tắt riêng để chuyển đổi Việt/Anh
+- **Quick Vietnamese** -- tắt mặc định; một chữ `w` sau phụ âm sẽ thành `ư` (ví dụ: `tw` → `tư`), trong khi từ lẫn lộn như `huawei` vẫn giữ nguyên
+
+**General**
+- **Launch at login** -- tự động khởi động NovaKey
+- **Play sound on switch** -- phát âm thanh khi chuyển chế độ
+- **Switch with Fn (Globe) key** -- bật mặc định; đồng bộ với nút chuyển ngôn ngữ của hệ thống
+
+**Compatibility**
 - **Fix browser autocomplete** -- bật mặc định, giúp gõ tiếng Việt trên thanh địa chỉ Chrome/Safari
 - **Send keys step-by-step** -- tắt mặc định, bật nếu bạn thấy ký tự bị lỗi trên một số ứng dụng
 
