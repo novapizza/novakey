@@ -10,7 +10,7 @@ final class EventTapManager {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var retainedSelf: Unmanaged<EventTapManager>?
-    private var isRunning = false
+    private(set) var isRunning = false
 
     let sourceManager: EventSourceManager
     let engine: TelexEngine
@@ -61,12 +61,11 @@ final class EventTapManager {
             (1 << CGEventType.leftMouseDown.rawValue) |
             (1 << CGEventType.rightMouseDown.rawValue)
 
-        // Bridge `self` to the C callback via userInfo pointer.
-        // Use passRetained to prevent use-after-free if manager is deallocated
-        // while the tap is active. Released in stop().
-        let retained = Unmanaged.passRetained(self)
-        self.retainedSelf = retained
-        let userInfo = retained.toOpaque()
+        // Bridge `self` to the C callback via userInfo pointer. The retain
+        // that keeps this pointer valid is only taken once the tap and run
+        // loop source are confirmed created (see below), so failed attempts
+        // don't leak a retain per retry.
+        let userInfo = Unmanaged.passUnretained(self).toOpaque()
 
         // Try cgSessionEventTap first
         var tap = CGEvent.tapCreate(
@@ -95,14 +94,16 @@ final class EventTapManager {
             return false
         }
 
-        self.eventTap = tap
-
         guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
             Log.error("Failed to create run loop source")
-            self.eventTap = nil
+            CFMachPortInvalidate(tap)
             return false
         }
 
+        // Everything created successfully -- now take the retain that keeps
+        // `self` alive while the tap is active. Released in stop().
+        self.retainedSelf = Unmanaged.passRetained(self)
+        self.eventTap = tap
         self.runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
@@ -210,7 +211,11 @@ final class EventTapManager {
             return nil // Suppress the hotkey event
         }
 
-        let isShift = flags.contains(.maskShift)
+        // Effective letter case = Shift XOR CapsLock. Without folding CapsLock
+        // (.maskAlphaShift) in, replaced text would be rebuilt lowercase while
+        // pass-through consonants stay uppercase -- e.g. "CHào" instead of
+        // "CHÀO" when composing with CapsLock on.
+        let isShift = flags.contains(.maskShift) != flags.contains(.maskAlphaShift)
         let hasCmd = flags.contains(.maskCommand)
         let hasCtrl = flags.contains(.maskControl)
         let hasOption = flags.contains(.maskAlternate)

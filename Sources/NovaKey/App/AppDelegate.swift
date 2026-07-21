@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var eventTapManager: EventTapManager!
     private var statusBarController: StatusBarController!
     private var settingsWindow: NSWindow?
+    private var permissionsWindow: NSWindow?
     private let browserWatcher = BrowserWatcher()
 
     // MARK: - App Lifecycle
@@ -85,8 +86,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         eventTapManager.keySender.browserKind = browserWatcher.kind
         eventTapManager.keySender.reduceFlicker = browserWatcher.isFlickerProne
 
-        // Start event tap
-        startEventTap()
+        // Start the event tap only once permissions are verified; otherwise
+        // show the non-modal onboarding window. No system prompts fire here.
+        if AccessibilityPermission.isGranted {
+            startEventTap()
+        } else {
+            Log.info("Permissions missing -- showing onboarding")
+            showPermissionsOnboarding()
+        }
 
         // Register for sleep/wake notifications
         let workspace = NSWorkspace.shared.notificationCenter
@@ -106,8 +113,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.info("NovaKey terminated")
     }
 
+    /// Recheck permissions whenever the user comes back to NovaKey (e.g.
+    /// after granting one in System Settings). Replaces the old 2s polling.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard eventTapManager != nil, !eventTapManager.isRunning else { return }
+        if AccessibilityPermission.isGranted {
+            startEventTap()
+        }
+    }
+
     // MARK: - Event Tap
 
+    /// Start the tap. Never prompts or polls; on failure it (re-)shows the
+    /// non-modal onboarding window so the user drives the permission flow.
     private func startEventTap() {
         guard eventTapManager != nil else {
             Log.error("Cannot start: EventTapManager is nil")
@@ -116,23 +134,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if eventTapManager.start() {
             Log.info("Event tap started OK")
+            permissionsWindow?.close()
+            permissionsWindow = nil
         } else {
-            Log.error("Event tap FAILED -- requesting permission...")
-            AccessibilityPermission.requestAccess()
-            AccessibilityPermission.showPermissionAlert()
-            pollForPermission()
+            Log.error("Event tap FAILED -- showing permissions onboarding")
+            showPermissionsOnboarding()
         }
     }
 
-    /// Poll every 2 seconds until permission is granted, then start the event tap.
-    private func pollForPermission() {
-        Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
-            if AccessibilityPermission.isGranted {
-                timer.invalidate()
-                Log.info("Permission granted via polling")
-                self?.startEventTap()
-            }
+    // MARK: - Permissions Onboarding
+
+    private func showPermissionsOnboarding() {
+        if let window = permissionsWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
         }
+
+        let view = PermissionsOnboardingView(onCheckAgain: { [weak self] in
+            guard let self else { return }
+            if AccessibilityPermission.isGranted {
+                self.startEventTap()
+            }
+        })
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 320),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "NovaKey Setup"
+        window.contentView = NSHostingView(rootView: view)
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        self.permissionsWindow = window
     }
 
     // MARK: - Settings

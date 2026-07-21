@@ -1,21 +1,25 @@
 // AccessibilityPermission.swift
-// Checks and requests Input Monitoring permission
-// required for CGEvent tap to work.
+// Checks and requests Input Monitoring and Accessibility permissions
+// required for the CGEvent tap to work.
+//
+// Design: preflight checks never prompt; requests are staged one at a
+// time and never combined with a blocking modal. See the permissions
+// onboarding window in AppDelegate for the user-driven flow.
 
 import Cocoa
-import IOKit.hidsystem
 
 enum AccessibilityPermission {
 
+    // MARK: - Preflight (never prompts)
+
     /// Whether the app has Input Monitoring permission.
     static var hasInputMonitoring: Bool {
-        let access = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
-        return access == kIOHIDAccessTypeGranted
+        CGPreflightListenEventAccess()
     }
 
     /// Whether the app has Accessibility permission.
     static var hasAccessibility: Bool {
-        AXIsProcessTrustedWithOptions(nil)
+        AXIsProcessTrusted()
     }
 
     /// Whether both permissions are granted.
@@ -23,54 +27,37 @@ enum AccessibilityPermission {
         hasInputMonitoring && hasAccessibility
     }
 
-    /// Request both Input Monitoring and Accessibility permissions.
-    static func requestAccess() {
-        // Request Input Monitoring
-        let im = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
-        Log.info("IOHIDRequestAccess(ListenEvent): \(im)")
+    // MARK: - Staged requests (one at a time, no modal on top)
 
-        // Request Accessibility (shows system prompt)
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-        let ax = AXIsProcessTrustedWithOptions(options)
-        Log.info("AXIsProcessTrusted: \(ax)")
+    /// Request Input Monitoring. Shows the system prompt if not yet determined.
+    @discardableResult
+    static func requestInputMonitoring() -> Bool {
+        let granted = CGRequestListenEventAccess()
+        Log.info("CGRequestListenEventAccess: \(granted)")
+        return granted
     }
 
-    /// Show an alert explaining why permission is needed, then request it.
-    static func showPermissionAlert() {
-        let im = hasInputMonitoring
-        let ax = hasAccessibility
+    /// Request Accessibility. Shows the asynchronous system prompt if not
+    /// yet determined. Do not present any modal UI on top of this.
+    @discardableResult
+    static func requestAccessibility() -> Bool {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        let trusted = AXIsProcessTrustedWithOptions(options)
+        Log.info("AXIsProcessTrustedWithOptions: \(trusted)")
+        return trusted
+    }
 
-        var needed: [String] = []
-        if !im { needed.append("Input Monitoring") }
-        if !ax { needed.append("Accessibility") }
+    // MARK: - System Settings deep links (non-blocking)
 
-        let alert = NSAlert()
-        alert.messageText = "NovaKey Needs Permissions"
-        alert.informativeText = """
-            NovaKey needs the following permissions to work:
-            \(needed.joined(separator: " and "))
+    static func openInputMonitoringSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+            NSWorkspace.shared.open(url)
+        }
+    }
 
-            Please enable NovaKey in:
-            System Settings > Privacy & Security > \(needed.first ?? "Input Monitoring")
-
-            After granting, NovaKey will start automatically.
-            You may need to restart NovaKey after granting Accessibility.
-            """
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Continue Anyway")
-
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            if !ax {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                    NSWorkspace.shared.open(url)
-                }
-            } else {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
+    static func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
         }
     }
 }
