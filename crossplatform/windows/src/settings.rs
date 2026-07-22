@@ -25,6 +25,9 @@ pub struct Settings {
     pub play_sound: bool,
     /// "Quick Vietnamese": a lone `w` after an initial consonant -> ư.
     pub quick_vietnamese: bool,
+    /// "Deferred diacritics" (Bỏ dấu sau): modifier keys typed later in the
+    /// word apply backward ("did" -> "đi"). Sub-option of Quick Vietnamese.
+    pub deferred_diacritics: bool,
     /// Language-toggle hotkey modifier bitmask (`RegisterHotKey` MOD_* flags).
     pub hotkey_mods: u32,
     /// Language-toggle hotkey virtual-key code.
@@ -40,6 +43,7 @@ impl Default for Settings {
             fix_browser_autocomplete: true,
             play_sound: false,
             quick_vietnamese: false,
+            deferred_diacritics: false,
             hotkey_mods: hotkey::DEFAULT_MODS,
             hotkey_vk: hotkey::DEFAULT_VK,
         }
@@ -69,6 +73,8 @@ impl Settings {
                 s.play_sound = read_bool(&text, "playSound").unwrap_or(s.play_sound);
                 s.quick_vietnamese =
                     read_bool(&text, "quickVietnamese").unwrap_or(s.quick_vietnamese);
+                s.deferred_diacritics =
+                    read_bool(&text, "deferredDiacritics").unwrap_or(s.deferred_diacritics);
                 s.hotkey_mods = read_u32(&text, "hotkeyMods").unwrap_or(s.hotkey_mods);
                 s.hotkey_vk = read_u32(&text, "hotkeyVk").unwrap_or(s.hotkey_vk);
             }
@@ -82,13 +88,14 @@ impl Settings {
                 let _ = fs::create_dir_all(dir);
             }
             let json = format!(
-                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {},\n  \"playSound\": {},\n  \"quickVietnamese\": {},\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {}\n}}\n",
+                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {},\n  \"playSound\": {},\n  \"quickVietnamese\": {},\n  \"deferredDiacritics\": {},\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {}\n}}\n",
                 self.enabled,
                 self.step_by_step,
                 self.start_with_windows,
                 self.fix_browser_autocomplete,
                 self.play_sound,
                 self.quick_vietnamese,
+                self.deferred_diacritics,
                 self.hotkey_mods,
                 self.hotkey_vk
             );
@@ -190,6 +197,21 @@ mod tests {
         assert_eq!(read_bool(json, "stepByStep"), Some(true));
         assert_eq!(read_bool(json, "startWithWindows"), Some(false));
         assert_eq!(read_bool(json, "missing"), None);
+    }
+
+    #[test]
+    fn round_trips_deferred_diacritics() {
+        let s = Settings {
+            quick_vietnamese: true,
+            deferred_diacritics: true,
+            ..Settings::default()
+        };
+        let json = format!(
+            "{{\n  \"quickVietnamese\": {},\n  \"deferredDiacritics\": {}\n}}",
+            s.quick_vietnamese, s.deferred_diacritics
+        );
+        assert_eq!(read_bool(&json, "quickVietnamese"), Some(true));
+        assert_eq!(read_bool(&json, "deferredDiacritics"), Some(true));
     }
 
     #[test]

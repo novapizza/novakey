@@ -85,6 +85,12 @@ pub fn set_quick_vietnamese(on: bool) {
     ENGINE.with(|e| e.borrow_mut().set_quick_vietnamese(on));
 }
 
+/// Enable/disable "Deferred diacritics" (Bỏ dấu sau) on the engine — only
+/// effective while Quick Vietnamese is also on (persists across resets).
+pub fn set_deferred_diacritics(on: bool) {
+    ENGINE.with(|e| e.borrow_mut().set_deferred_diacritics(on));
+}
+
 /// Low-level keyboard hook callback.
 pub unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code != HC_ACTION as i32 {
