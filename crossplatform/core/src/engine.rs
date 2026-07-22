@@ -52,15 +52,28 @@ pub struct TelexEngine {
     /// syllable-initial consonant (cluster) becomes `ư`, e.g. "tw" -> "tư",
     /// "chw" -> "chư". Off by default; opted in from Settings.
     pub quick_vietnamese: bool,
+    /// "Deferred diacritics" (Vietnamese: "Bỏ dấu sau", Windows-only): a
+    /// modifier key typed later in the word applies backward — "did" -> "đi",
+    /// "thana" -> "thân". Sub-option of Quick Vietnamese: only active when
+    /// `quick_vietnamese` is also on. Off by default; opted in from Settings.
+    pub deferred_diacritics: bool,
 
     /// The last raw (lowercase) key typed, for double-press detection.
     last_raw_key: Option<char>,
     /// Raw letter keystrokes typed this session, with original case.
     raw_keystrokes: String,
+    /// Whether a deferred transformation (đ or circumflex applied backward)
+    /// fired in the current word. Needed because a bare deferred đ is invisible
+    /// to `has_visible_transformation`, yet must still trigger revert/restore.
+    deferred_transform: bool,
+    /// After a mid-word backspace `raw_keystrokes` no longer matches the screen,
+    /// so the inline English-word guard must not rebuild from it.
+    inline_guard_disabled: bool,
 
     /// The syllable state at the moment of the most recent word-break.
     saved_buffer: Option<SyllableBuffer>,
     saved_raw_keystrokes: String,
+    saved_deferred_transform: bool,
 }
 
 impl Default for TelexEngine {
@@ -75,10 +88,14 @@ impl TelexEngine {
             buffer: SyllableBuffer::new(),
             is_vietnamese_mode: true,
             quick_vietnamese: false,
+            deferred_diacritics: false,
             last_raw_key: None,
             raw_keystrokes: String::new(),
+            deferred_transform: false,
+            inline_guard_disabled: false,
             saved_buffer: None,
             saved_raw_keystrokes: String::new(),
+            saved_deferred_transform: false,
         }
     }
 
@@ -123,6 +140,7 @@ impl TelexEngine {
                 if !self.buffer.is_empty() {
                     self.saved_buffer = Some(self.buffer.clone());
                     self.saved_raw_keystrokes = self.raw_keystrokes.clone();
+                    self.saved_deferred_transform = self.deferred_transform;
                 } else {
                     self.saved_buffer = None;
                 }
@@ -137,6 +155,7 @@ impl TelexEngine {
                     let saved = self.saved_buffer.take().unwrap();
                     self.buffer = saved;
                     self.raw_keystrokes = self.saved_raw_keystrokes.clone();
+                    self.deferred_transform = self.saved_deferred_transform;
                     self.last_raw_key = self
                         .saved_raw_keystrokes
                         .chars()
@@ -188,7 +207,8 @@ impl TelexEngine {
                 // foreign/mixed input does. Runs here (not in process_letter) so
                 // it also covers the tone-key and d-key paths.
                 if self.quick_vietnamese
-                    && self.has_visible_transformation()
+                    && (self.has_visible_transformation() || self.deferred_transform)
+                    && !self.inline_guard_disabled
                     && !is_valid_syllable(&self.buffer)
                     && self.buffer.text() != self.raw_keystrokes
                 {
@@ -207,12 +227,27 @@ impl TelexEngine {
         self.buffer.reset();
         self.last_raw_key = None;
         self.raw_keystrokes.clear();
+        self.deferred_transform = false;
+        self.inline_guard_disabled = false;
     }
 
     /// Enable/disable "Quick Vietnamese" (w-after-initial-consonant -> ư).
     /// Persists across `reset_session`, so it survives word breaks.
     pub fn set_quick_vietnamese(&mut self, on: bool) {
         self.quick_vietnamese = on;
+    }
+
+    /// Enable/disable "Deferred diacritics" (Bỏ dấu sau). The setting is stored
+    /// independently but only takes effect while Quick Vietnamese is on.
+    /// Persists across `reset_session`, so it survives word breaks.
+    pub fn set_deferred_diacritics(&mut self, on: bool) {
+        self.deferred_diacritics = on;
+    }
+
+    /// Whether deferred-diacritic behavior is currently active: it is a
+    /// sub-option of Quick Vietnamese, inert without it.
+    fn deferred_enabled(&self) -> bool {
+        self.quick_vietnamese && self.deferred_diacritics
     }
 
     /// Whether the buffer currently holds exactly one valid syllable-initial
@@ -257,6 +292,16 @@ impl TelexEngine {
                 self.last_raw_key = Some(lower);
                 return result;
             }
+        }
+
+        // Deferred double vowel ("Bỏ dấu sau"): an a/e/o typed after the final
+        // consonant applies circumflex to the earlier same base vowel —
+        // "thana" -> "thân", "viene" -> "viên". Adjacent doubles above always
+        // win; this only fires where a plain append could never be Vietnamese.
+        if self.deferred_enabled() && self.is_deferred_double_trigger(lower) {
+            let result = self.handle_deferred_double(lower);
+            self.last_raw_key = Some(lower);
+            return result;
         }
 
         // Regular letter — add to buffer. Capture the pre-append text so a
@@ -321,6 +366,7 @@ impl TelexEngine {
     /// so the remainder of the word is composed literally. Used by the inline
     /// English-word guard once a transformation has proven to be a dead end.
     fn rebuild_as_literal(&mut self, raw: &str) {
+        self.deferred_transform = false;
         self.buffer.reset();
         for c in raw.chars() {
             self.buffer.append(ViChar::with(
@@ -397,10 +443,32 @@ impl TelexEngine {
             }
         }
 
+        // Deferred đ ("Bỏ dấu sau"): a later 'd' strokes the syllable-initial
+        // 'd' — "did" -> "đi", "dend" -> "đen". Only when the buffer is already
+        // a valid syllable, which both guarantees chars[0] is the (sole)
+        // initial 'd' and keeps English fragments ("disable"+d, non-contiguous
+        // vowels -> invalid) on the literal-append path below.
+        if self.deferred_enabled()
+            && !self.buffer.has_dstroke
+            && self.buffer.count() > 1
+            && self.buffer.chars[0].base == 'd'
+            && !self.buffer.chars[0].has_dstroke
+            && is_valid_syllable(&self.buffer)
+        {
+            let old_text = self.buffer.text();
+            self.buffer.apply_dstroke(0);
+            self.deferred_transform = true;
+            let new_text = self.buffer.text();
+            return self.build_replacement(&old_text, &new_text);
+        }
+
         // Already has đ and typing another d -> undo (đd -> dd).
         if self.buffer.has_dstroke && self.last_raw_key == Some('d') {
             let old_text = self.buffer.text();
             self.buffer.remove_dstroke();
+            // The escaped text is what the user wants — a deferred transform
+            // no longer forces the guard/restore paths ("didd" stays "did").
+            self.deferred_transform = false;
             self.buffer
                 .append(ViChar::with('d', VowelModifier::Plain, ToneMark::None, is_upper));
             let new_text = self.buffer.text();
@@ -421,6 +489,47 @@ impl TelexEngine {
             None => false,
             Some(last) => last == ch && (ch == 'a' || ch == 'e' || ch == 'o'),
         }
+    }
+
+    /// Whether this a/e/o keystroke should apply a deferred circumflex to an
+    /// earlier vowel. Requires a final consonant to already be present: from
+    /// there an appended vowel could never form a Vietnamese syllable (nucleus
+    /// contiguity), so reinterpreting the key loses no legitimate input. Open
+    /// nuclei ("khoeo", "xoong") keep the normal append/adjacent behavior.
+    fn is_deferred_double_trigger(&self, ch: char) -> bool {
+        if !matches!(ch, 'a' | 'e' | 'o') {
+            return false;
+        }
+        if !self.buffer.has_ending_consonant() {
+            return false;
+        }
+        match self.buffer.last_index_of_base(ch) {
+            Some(i) => {
+                self.buffer.chars[i].is_vowel()
+                    && self.buffer.chars[i].modifier == VowelModifier::Plain
+                    && is_valid_syllable(&self.buffer)
+            }
+            None => false,
+        }
+    }
+
+    /// Apply a deferred circumflex ("thana" -> "thân") and re-place the tone,
+    /// since a circumflexed vowel attracts the mark ("muonso" -> "muốn").
+    fn handle_deferred_double(&mut self, key: char) -> EngineResult {
+        let target_idx = self.buffer.last_index_of_base(key).unwrap();
+        let old_text = self.buffer.text();
+        self.buffer.apply_modifier(VowelModifier::Circumflex, target_idx);
+        self.deferred_transform = true;
+        if self.buffer.current_tone != ToneMark::None {
+            if let Some(current_tone_idx) = self.buffer.tone_index {
+                if let Some(new_position) = find_tone_position(&self.buffer) {
+                    if new_position != current_tone_idx {
+                        self.buffer.move_tone(new_position);
+                    }
+                }
+            }
+        }
+        self.build_replacement(&old_text, &self.buffer.text())
     }
 
     /// Handle vowel modifier keys. Returns None if no modification can be applied.
@@ -565,6 +674,9 @@ impl TelexEngine {
     fn undo_vowel_modifier(&mut self, key: char, target_index: usize, is_upper: bool) -> EngineResult {
         let old_text = self.buffer.text();
         self.buffer.remove_modifier(target_index);
+        // Escaping a deferred circumflex ("thanaa" -> "thana") releases the
+        // guard — unless a (possibly deferred, invisible) đ is still present.
+        self.deferred_transform &= self.buffer.has_dstroke;
         self.buffer
             .append(ViChar::with(key, VowelModifier::Plain, ToneMark::None, is_upper));
         let new_text = self.buffer.text();
@@ -576,8 +688,11 @@ impl TelexEngine {
     fn handle_backspace(&mut self) -> EngineResult {
         self.buffer.remove_last();
         // Once the user corrects mid-word, we can't reconstruct the original
-        // raw keystrokes, so disable the restore path for this session.
+        // raw keystrokes, so disable the restore path for this session — and
+        // the inline guard too, which would otherwise rebuild the visible word
+        // from a now-partial raw string.
         self.raw_keystrokes.clear();
+        self.inline_guard_disabled = true;
         EngineResult::PassThrough
     }
 
@@ -594,9 +709,10 @@ impl TelexEngine {
         }
 
         // Only restore when a tone or vowel-modifier transformation is visible.
-        // (đ deliberately does NOT count — it only fires syllable-initially and
-        // a vowel-less "đ" is legitimate on its own.)
-        if !self.has_visible_transformation() {
+        // (An adjacent-dd đ deliberately does NOT count — it only fires
+        // syllable-initially and a vowel-less "đ" is legitimate on its own.
+        // A DEFERRED transform does count, even a bare deferred đ.)
+        if !self.has_visible_transformation() && !self.deferred_transform {
             return None;
         }
 

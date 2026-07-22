@@ -32,6 +32,7 @@ pub const CMD_QUIT: usize = 5;
 pub const CMD_SETTINGS: usize = 6;
 pub const CMD_PLAYSOUND: usize = 7;
 pub const CMD_QUICKVN: usize = 8;
+pub const CMD_DEFERRED: usize = 9;
 
 const TRAY_UID: u32 = 1;
 

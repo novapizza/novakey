@@ -38,13 +38,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::hotkey;
 use crate::tray::{
-    CMD_AUTOCOMPLETE, CMD_AUTOSTART, CMD_PLAYSOUND, CMD_QUICKVN, CMD_STEP, CMD_TOGGLE,
+    CMD_AUTOCOMPLETE, CMD_AUTOSTART, CMD_DEFERRED, CMD_PLAYSOUND, CMD_QUICKVN, CMD_STEP,
+    CMD_TOGGLE,
 };
 
 // MARK: - Layout constants (client pixels)
 
 const CLIENT_W: i32 = 460;
-const CLIENT_H: i32 = 708;
+const CLIENT_H: i32 = 770;
 const PAD: i32 = 18;
 const CARD_PAD: i32 = 16;
 const CARD_RADIUS: i32 = 14;
@@ -58,6 +59,7 @@ enum Region {
     PillEn,
     HotkeyChange,
     ToggleQuickVn,
+    ToggleDeferred,
     ToggleAutostart,
     ToggleSound,
     ToggleFix,
@@ -250,6 +252,12 @@ unsafe fn on_click(hwnd: HWND, x: i32, y: i32) {
             }
         }
         Region::ToggleQuickVn => send_cmd(main_hwnd, CMD_QUICKVN),
+        Region::ToggleDeferred => {
+            // Sub-option of Quick Vietnamese — ignore clicks while it's off.
+            if crate::SETTINGS.with(|s| s.borrow().quick_vietnamese) {
+                send_cmd(main_hwnd, CMD_DEFERRED);
+            }
+        }
         Region::ToggleAutostart => send_cmd(main_hwnd, CMD_AUTOSTART),
         Region::ToggleSound => send_cmd(main_hwnd, CMD_PLAYSOUND),
         Region::ToggleFix => send_cmd(main_hwnd, CMD_AUTOCOMPLETE),
@@ -351,13 +359,14 @@ unsafe fn paint(hwnd: HWND) {
     // Snapshot the state we render.
     let enabled = crate::hook::is_enabled();
     let fix = crate::hook::is_fix_autocomplete();
-    let (autostart, step, sound, quick_vn, mods, vk) = crate::SETTINGS.with(|s| {
+    let (autostart, step, sound, quick_vn, deferred, mods, vk) = crate::SETTINGS.with(|s| {
         let s = s.borrow();
         (
             s.start_with_windows,
             s.step_by_step,
             s.play_sound,
             s.quick_vietnamese,
+            s.deferred_diacritics,
             s.hotkey_mods,
             s.hotkey_vk,
         )
@@ -405,7 +414,7 @@ unsafe fn paint(hwnd: HWND) {
 
     // ----- Card: INPUT METHOD -----
     {
-        let card = rect(PAD, y, cw - PAD, y + 262);
+        let card = rect(PAD, y, cw - PAD, y + 324);
         fill_round(mem, card, CARD_RADIUS, CARD_BG);
         let ix = card.left + CARD_PAD;
         let ir = card.right - CARD_PAD;
@@ -477,6 +486,30 @@ unsafe fn paint(hwnd: HWND) {
             mem,
             "Type w → ư after an initial consonant (tw→tư, chw→chư)",
             rect(ix, cy, ir, cy + 18),
+            TEXT2,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
+        cy += 18 + 10;
+
+        // Deferred diacritics — indented sub-option, greyed while Quick
+        // Vietnamese is off (clicks are ignored in that state too).
+        let sub_ix = ix + 16;
+        SelectObject(mem, f_row);
+        draw_text(
+            mem,
+            "Deferred diacritics (Bỏ dấu sau)",
+            rect(sub_ix, cy, ir - 60, cy + 28),
+            if quick_vn { TEXT } else { TEXT2 },
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
+        let dr = draw_toggle(mem, ir, cy + 14, quick_vn && deferred);
+        hits.push((Region::ToggleDeferred, dr));
+        cy += 30;
+        SelectObject(mem, f_small);
+        draw_text(
+            mem,
+            "Marks typed later apply backward (did→đi, thana→thân)",
+            rect(sub_ix, cy, ir, cy + 18),
             TEXT2,
             DT_LEFT | DT_SINGLELINE | DT_VCENTER,
         );
