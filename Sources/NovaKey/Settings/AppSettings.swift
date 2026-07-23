@@ -51,6 +51,15 @@ final class AppSettings {
         set { defaults.set(newValue, forKey: AppConstants.Defaults.quickVietnamese) }
     }
 
+    /// Whether "Deferred diacritics" (Bỏ dấu sau) is enabled: a modifier key
+    /// typed later in the word applies backward ("did" -> "đi", "thana" ->
+    /// "thân"). Sub-option of Quick Vietnamese -- inert unless it is also on.
+    /// Off by default.
+    var deferredDiacritics: Bool {
+        get { defaults.bool(forKey: AppConstants.Defaults.deferredDiacritics) }
+        set { defaults.set(newValue, forKey: AppConstants.Defaults.deferredDiacritics) }
+    }
+
     /// Hotkey keycode for toggling Vietnamese/English.
     var toggleHotkeyKeyCode: UInt16 {
         get {

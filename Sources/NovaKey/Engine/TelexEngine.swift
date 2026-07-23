@@ -47,6 +47,12 @@ final class TelexEngine {
     /// mirrors the Windows port.
     var quickVietnamese: Bool = false
 
+    /// "Deferred diacritics" (Vietnamese: "Bỏ dấu sau"): a modifier key typed
+    /// later in the word applies backward -- "did" -> "đi", "thana" -> "thân".
+    /// Sub-option of Quick Vietnamese: only active when `quickVietnamese` is
+    /// also on. Off by default; mirrors the Windows port.
+    var deferredDiacritics: Bool = false
+
     /// The last raw key that was typed (for double-press detection).
     private var lastRawKey: Character? = nil
 
@@ -56,6 +62,15 @@ final class TelexEngine {
     /// exact restoration impossible).
     private var rawKeystrokes: String = ""
 
+    /// Whether a deferred transformation (đ or circumflex applied backward)
+    /// fired in the current word. Needed because a bare deferred đ is invisible
+    /// to `hasVisibleTransformation`, yet must still trigger revert/restore.
+    private var deferredTransform: Bool = false
+
+    /// After a mid-word backspace `rawKeystrokes` no longer matches the screen,
+    /// so the inline English-word guard must not rebuild from it.
+    private var inlineGuardDisabled: Bool = false
+
     /// The syllable state at the moment of the most recent word-break.
     /// If the user immediately presses backspace (to delete the word-break
     /// character), we re-enter this state so further Telex keys continue to
@@ -63,6 +78,7 @@ final class TelexEngine {
     /// follows the word-break.
     private var savedBuffer: SyllableBuffer? = nil
     private var savedRawKeystrokes: String = ""
+    private var savedDeferredTransform: Bool = false
 
     // MARK: - Main Entry Point
 
@@ -111,6 +127,7 @@ final class TelexEngine {
             if !buffer.isEmpty {
                 savedBuffer = buffer
                 savedRawKeystrokes = rawKeystrokes
+                savedDeferredTransform = deferredTransform
             } else {
                 savedBuffer = nil
             }
@@ -125,6 +142,7 @@ final class TelexEngine {
             if buffer.isEmpty, let saved = savedBuffer {
                 buffer = saved
                 rawKeystrokes = savedRawKeystrokes
+                deferredTransform = savedDeferredTransform
                 lastRawKey = savedRawKeystrokes.last?.lowercased().first
                 savedBuffer = nil
                 return .passThrough
@@ -170,7 +188,8 @@ final class TelexEngine {
         // foreign/mixed input does. Runs here (not in processLetter) so it also
         // covers the tone-key and d-key paths.
         if quickVietnamese,
-           hasVisibleTransformation(),
+           hasVisibleTransformation() || deferredTransform,
+           !inlineGuardDisabled,
            !SpellingChecker.isValidSyllable(buffer),
            buffer.text != rawKeystrokes {
             let raw = rawKeystrokes
@@ -186,9 +205,17 @@ final class TelexEngine {
         buffer.reset()
         lastRawKey = nil
         rawKeystrokes = ""
+        deferredTransform = false
+        inlineGuardDisabled = false
     }
 
     // MARK: - Quick Vietnamese Helpers
+
+    /// Whether deferred-diacritic behavior is currently active: it is a
+    /// sub-option of Quick Vietnamese, inert without it.
+    private func deferredEnabled() -> Bool {
+        quickVietnamese && deferredDiacritics
+    }
 
     /// Whether the buffer currently holds exactly one valid syllable-initial
     /// consonant cluster and no vowels yet -- the precondition for Quick
@@ -215,6 +242,7 @@ final class TelexEngine {
     /// so the remainder of the word is composed literally. Used by the inline
     /// English-word guard once a transformation has proven to be a dead end.
     private func rebuildAsLiteral(_ raw: String) {
+        deferredTransform = false
         buffer.reset()
         for c in raw {
             let lower = c.lowercased().first ?? c
@@ -249,6 +277,16 @@ final class TelexEngine {
                 lastRawKey = lower
                 return result
             }
+        }
+
+        // Deferred double vowel ("Bỏ dấu sau"): an a/e/o typed after the final
+        // consonant applies circumflex to the earlier same base vowel --
+        // "thana" -> "thân", "viene" -> "viên". Adjacent doubles above always
+        // win; this only fires where a plain append could never be Vietnamese.
+        if deferredEnabled(), isDeferredDoubleTrigger(lower) {
+            let result = handleDeferredDouble(lower)
+            lastRawKey = lower
+            return result
         }
 
         // Regular letter -- add to buffer. Capture the app's current display
@@ -362,10 +400,31 @@ final class TelexEngine {
             return buildReplacement(oldText: oldText, newText: newText)
         }
 
+        // Deferred đ ("Bỏ dấu sau"): a later 'd' strokes the syllable-initial
+        // 'd' -- "did" -> "đi", "dend" -> "đen". Only when the buffer is already
+        // a valid syllable, which both guarantees chars[0] is the (sole)
+        // initial 'd' and keeps English fragments ("disable"+d, non-contiguous
+        // vowels -> invalid) on the literal-append path below.
+        if deferredEnabled(),
+           !buffer.hasDStroke,
+           buffer.count > 1,
+           buffer.chars[0].base == "d",
+           !buffer.chars[0].hasDStroke,
+           SpellingChecker.isValidSyllable(buffer) {
+            let oldText = buffer.text
+            buffer.applyDStroke(at: 0)
+            deferredTransform = true
+            let newText = buffer.text
+            return buildReplacement(oldText: oldText, newText: newText)
+        }
+
         // If already has đ and typing another d -> undo (đd -> dd)
         if buffer.hasDStroke, lastRawKey == "d" {
             let oldText = buffer.text
             buffer.removeDStroke()
+            // The escaped text is what the user wants -- a deferred transform
+            // no longer forces the guard/restore paths ("didd" stays "did").
+            deferredTransform = false
             let viChar = ViChar(base: "d", isUpperCase: isUpperCase)
             buffer.append(viChar)
             let newText = buffer.text
@@ -376,6 +435,38 @@ final class TelexEngine {
         let viChar = ViChar(base: "d", isUpperCase: isUpperCase)
         buffer.append(viChar)
         return .passThrough
+    }
+
+    // MARK: - Deferred Diacritics ("Bỏ dấu sau")
+
+    /// Whether this a/e/o keystroke should apply a deferred circumflex to an
+    /// earlier vowel. Requires a final consonant to already be present: from
+    /// there an appended vowel could never form a Vietnamese syllable (nucleus
+    /// contiguity), so reinterpreting the key loses no legitimate input. Open
+    /// nuclei ("khoeo", "xoong") keep the normal append/adjacent behavior.
+    private func isDeferredDoubleTrigger(_ ch: Character) -> Bool {
+        guard ch == "a" || ch == "e" || ch == "o" else { return false }
+        guard buffer.hasEndingConsonant else { return false }
+        guard let i = buffer.lastIndex(ofBase: ch) else { return false }
+        return buffer.chars[i].isVowel
+            && buffer.chars[i].modifier == .none
+            && SpellingChecker.isValidSyllable(buffer)
+    }
+
+    /// Apply a deferred circumflex ("thana" -> "thân") and re-place the tone,
+    /// since a circumflexed vowel attracts the mark ("muonso" -> "muốn").
+    private func handleDeferredDouble(_ key: Character) -> EngineResult {
+        let targetIdx = buffer.lastIndex(ofBase: key)!
+        let oldText = buffer.text
+        buffer.applyModifier(.circumflex, at: targetIdx)
+        deferredTransform = true
+        if buffer.currentTone != .none,
+           let currentToneIdx = buffer.toneIndex,
+           let newPosition = TonePlacement.findTonePosition(in: buffer),
+           newPosition != currentToneIdx {
+            buffer.moveTone(to: newPosition)
+        }
+        return buildReplacement(oldText: oldText, newText: buffer.text)
     }
 
     // MARK: - Vowel Modifier Handling
@@ -510,6 +601,10 @@ final class TelexEngine {
         // Remove the modifier
         buffer.removeModifier(at: targetIndex)
 
+        // Escaping a deferred circumflex ("thanaa" -> "thana") releases the
+        // guard -- unless a (possibly deferred, invisible) đ is still present.
+        deferredTransform = deferredTransform && buffer.hasDStroke
+
         // Add the key as a literal character
         let viChar = ViChar(base: key, isUpperCase: isUpperCase)
         buffer.append(viChar)
@@ -523,9 +618,11 @@ final class TelexEngine {
     private func handleBackspace() -> EngineResult {
         buffer.removeLast()
         // Once the user corrects mid-word, we cannot reliably reconstruct
-        // the original raw keystrokes, so we disable the restore path for
-        // the remainder of this session.
+        // the original raw keystrokes, so we disable the restore path -- and
+        // the inline guard too, which would otherwise rebuild the visible word
+        // from a now-partial raw string.
         rawKeystrokes = ""
+        inlineGuardDisabled = true
         return .passThrough
     }
 
@@ -552,7 +649,11 @@ final class TelexEngine {
         // đ deliberately does NOT count: dd -> đ only fires syllable-
         // initially, so it can't happen by accident, and a vowel-less "đ"
         // is legitimate on its own (currency "50.000đ", shorthand "đc").
-        guard hasVisibleTransformation() else { return nil }
+        //
+        // A DEFERRED transform does count, even a bare deferred đ ("dido" ->
+        // "dido"): it is invisible to hasVisibleTransformation but must still
+        // revert to literal when the result is not a valid syllable.
+        guard hasVisibleTransformation() || deferredTransform else { return nil }
 
         // Don't restore if the syllable is structurally valid.
         if SpellingChecker.isValidSyllable(buffer) { return nil }
