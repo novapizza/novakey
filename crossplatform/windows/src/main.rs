@@ -20,11 +20,13 @@ use std::cell::RefCell;
 
 use windows::core::PWSTR;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
+};
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    CreateMutexW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
@@ -61,6 +63,20 @@ fn main() {
 }
 
 unsafe fn run() {
+    // Single-instance guard: a named mutex shared across all sessions of the
+    // current user. If it already exists, another NovaKey is running, so bail
+    // out before installing hooks or a second tray icon. The handle is held for
+    // the process lifetime (Windows frees it on exit); we never signal it.
+    let mutex_name = wide("Local\\NovaKeySingleInstanceMutex");
+    let _instance_mutex = match CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr())) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    if GetLastError() == ERROR_ALREADY_EXISTS {
+        // Another instance owns the mutex — exit quietly.
+        return;
+    }
+
     // Load persisted settings and apply them.
     let loaded = settings::Settings::load();
     SETTINGS.with(|s| *s.borrow_mut() = loaded);
