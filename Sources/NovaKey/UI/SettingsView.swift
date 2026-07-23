@@ -35,6 +35,7 @@ struct SettingsView: View {
     @State private var sendKeyStepByStep: Bool = AppSettings.shared.sendKeyStepByStep
     @State private var switchWithFnKey: Bool = AppSettings.shared.switchWithFnKey
     @State private var quickVietnamese: Bool = AppSettings.shared.quickVietnamese
+    @State private var deferredDiacritics: Bool = AppSettings.shared.deferredDiacritics
 
     /// Callback to toggle Vietnamese mode in the engine (wired from AppDelegate).
     var onToggleMode: ((Bool) -> Void)? = nil
@@ -98,6 +99,26 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(NovaTheme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                // Sub-option of Quick Vietnamese: indented, and greyed out /
+                // disabled while Quick Vietnamese is off.
+                VStack(alignment: .leading, spacing: 4) {
+                    row("Deferred diacritics (Bỏ dấu sau)", trailing: {
+                        NovaToggle(isOn: $deferredDiacritics)
+                            .onChange(of: deferredDiacritics) { _, v in
+                                AppSettings.shared.deferredDiacritics = v
+                                NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+                            }
+                    })
+                    Text("Add marks after the word: “did” → “đi”, “thana” → “thân”. Some English words that look Vietnamese may transform; press the key again to escape.")
+                        .font(.caption)
+                        .foregroundStyle(NovaTheme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.leading, 16)
+                .padding(.top, 6)
+                .disabled(!quickVietnamese)
+                .opacity(quickVietnamese ? 1 : 0.4)
             }
         }
     }

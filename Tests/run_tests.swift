@@ -132,6 +132,59 @@ func typeQuick(_ chars: String, quick: Bool) -> String {
     return engine.buffer.text
 }
 
+/// Type a sequence of letters with Deferred diacritics ("Bỏ dấu sau")
+/// optionally enabled. Deferred diacritics requires Quick Vietnamese, so
+/// enabling it turns on both flags. Returns the composed buffer text.
+func typeDeferred(_ chars: String, deferred: Bool) -> String {
+    let engine = TelexEngine()
+    engine.isVietnameseMode = true
+    engine.quickVietnamese = deferred
+    engine.deferredDiacritics = deferred
+    for char in chars {
+        let lower = char.lowercased().first!
+        _ = engine.processKey(keyCode: keyCodeFor(lower), isShift: char.isUppercase)
+    }
+    return engine.buffer.text
+}
+
+/// Apply every EngineResult to a running visible string -- validates exact
+/// backspace counts, not just the final buffer text.
+func simulateDeferred(_ chars: String, deferred: Bool) -> String {
+    let engine = TelexEngine()
+    engine.isVietnameseMode = true
+    engine.quickVietnamese = deferred
+    engine.deferredDiacritics = deferred
+    var visible: [Character] = []
+    for char in chars {
+        let isShift = char.isUppercase
+        let lower = char.lowercased().first!
+        let result = engine.processKey(keyCode: keyCodeFor(lower), isShift: isShift)
+        switch result {
+        case .passThrough, .wordBreak:
+            visible.append(isShift ? Character(lower.uppercased()) : lower)
+        case .replace(let bs, let text), .restore(let bs, let text):
+            visible.removeLast(min(bs, visible.count))
+            visible.append(contentsOf: text)
+        }
+    }
+    return String(visible)
+}
+
+/// Type letters (deferred on) then a space; return (break result, composed).
+func typeThenSpaceDeferred(_ chars: String) -> (space: EngineResult, composed: String) {
+    let engine = TelexEngine()
+    engine.isVietnameseMode = true
+    engine.quickVietnamese = true
+    engine.deferredDiacritics = true
+    for char in chars {
+        let lower = char.lowercased().first!
+        _ = engine.processKey(keyCode: keyCodeFor(lower), isShift: char.isUppercase)
+    }
+    let composed = engine.buffer.text
+    let result = engine.processKey(keyCode: KeyCode.space.rawValue)
+    return (result, composed)
+}
+
 // ============================================================
 // Main entry point
 // ============================================================
@@ -872,6 +925,146 @@ test("guard: genuine Vietnamese words unaffected (QV on)") {
     try expect(typeQuick("thuwowng", quick: true), "th\(uHorn)\u{01A1}ng") // thương
     try expect(typeQuick("chuaw", quick: true), "ch\(uHorn)a")     // chưa
     try expect(typeQuick("xuaw", quick: true), "x\(uHorn)a")       // xưa
+}
+
+// ============================================================
+// Deferred diacritics ("Bỏ dấu sau") -- opt-in sub-option of Quick Vietnamese
+// ============================================================
+print("\n--- Deferred diacritics ---")
+
+// Deferred đ
+test("deferred: did -> đi") {
+    try expect(typeDeferred("did", deferred: true), "\u{0111}i")
+}
+test("deferred: Did -> Đi (uppercase)") {
+    try expect(typeDeferred("Did", deferred: true), "\u{0110}i")
+}
+test("deferred: dend -> đen") {
+    try expect(typeDeferred("dend", deferred: true), "\u{0111}en")
+}
+test("deferred: dad -> đa (valid shape, by design)") {
+    try expect(typeDeferred("dad", deferred: true), "\u{0111}a")
+}
+test("deferred: did backspace count") {
+    try expect(simulateDeferred("did", deferred: true), "\u{0111}i")
+}
+
+// Deferred circumflex
+test("deferred: thana -> thân") {
+    try expect(typeDeferred("thana", deferred: true), "th\u{00E2}n")
+}
+test("deferred: viene -> viên") {
+    try expect(typeDeferred("viene", deferred: true), "vi\u{00EA}n")
+}
+test("deferred: nguyene -> nguyên") {
+    try expect(typeDeferred("nguyene", deferred: true), "nguy\u{00EA}n")
+}
+test("deferred: thana backspace count") {
+    try expect(simulateDeferred("thana", deferred: true), "th\u{00E2}n")
+}
+
+// Both forms + tone interplay
+test("deferred: dongdo -> đông (đ then ô)") {
+    try expect(typeDeferred("dongdo", deferred: true), "\u{0111}\u{00F4}ng")
+}
+test("deferred: dongod -> đông (ô then đ)") {
+    try expect(typeDeferred("dongod", deferred: true), "\u{0111}\u{00F4}ng")
+}
+test("deferred: muonso -> muốn (tone then deferred vowel)") {
+    try expect(typeDeferred("muonso", deferred: true), "mu\u{1ED1}n")
+}
+test("deferred: muonos -> muốn (deferred vowel then tone)") {
+    try expect(typeDeferred("muonos", deferred: true), "mu\u{1ED1}n")
+}
+test("deferred: nguyenxe -> nguyễn (tone re-placement)") {
+    try expect(typeDeferred("nguyenxe", deferred: true), "nguy\u{1EC5}n")
+}
+
+// Undo / escape (n+1 convention)
+test("deferred: didd escapes to did") {
+    try expect(typeDeferred("didd", deferred: true), "did")
+}
+test("deferred: thanaa escapes to thana") {
+    try expect(typeDeferred("thanaa", deferred: true), "thana")
+}
+test("deferred: dataa escapes to data") {
+    try expect(typeDeferred("dataa", deferred: true), "data")
+}
+test("deferred: photoo escapes to photo") {
+    try expect(typeDeferred("photoo", deferred: true), "photo")
+}
+
+// English guard: invalid results revert to literal in real time
+test("deferred guard: disabled stays literal") {
+    try expect(simulateDeferred("disabled", deferred: true), "disabled")
+}
+test("deferred guard: banana stays literal") {
+    try expect(simulateDeferred("banana", deferred: true), "banana")
+}
+test("deferred guard: cocoa stays literal") {
+    try expect(simulateDeferred("cocoa", deferred: true), "cocoa")
+}
+test("deferred guard: dido stays literal (bare deferred đ then invalid)") {
+    try expect(simulateDeferred("dido", deferred: true), "dido")
+}
+test("deferred guard: seven stays literal") {
+    try expect(simulateDeferred("seven", deferred: true), "seven")
+}
+test("deferred guard: element stays literal") {
+    try expect(simulateDeferred("element", deferred: true), "element")
+}
+
+// Never fires: open nuclei, wrong shapes
+test("deferred: khoeo open nucleus untouched") {
+    try expect(typeDeferred("khoeo", deferred: true), "khoeo")
+}
+test("deferred: xoong unchanged from default (adjacent oo wins)") {
+    try expect(typeDeferred("xoong", deferred: true), typeDeferred("xoong", deferred: false))
+    try expect(typeDeferred("xooong", deferred: true), "xoong")
+}
+test("deferred: add stays add (chars[0] not d for deferred)") {
+    try expect(typeDeferred("add", deferred: true), "add")
+}
+
+// Word break
+test("deferred: dend survives word break") {
+    let (result, composed) = typeThenSpaceDeferred("dend")
+    try expect(composed, "\u{0111}en")
+    try expect(result, EngineResult.wordBreak)
+}
+test("deferred: adjacent dd survives word break") {
+    let (result, composed) = typeThenSpaceDeferred("dd")
+    try expect(composed, "\u{0111}")
+    try expect(result, EngineResult.wordBreak)
+}
+
+// Documented limitation: valid-shaped English words transform
+test("deferred: data -> dât (documented trade-off)") {
+    try expect(typeDeferred("data", deferred: true), "d\u{00E2}t")
+}
+
+// Gating: inert without Quick Vietnamese
+test("deferred: inert without Quick Vietnamese") {
+    let e = TelexEngine()
+    e.isVietnameseMode = true
+    e.deferredDiacritics = true // quickVietnamese stays off
+    for char in "did" { _ = e.processKey(keyCode: keyCodeFor(char), isShift: false) }
+    try expect(e.buffer.text, "did")
+
+    let e2 = TelexEngine()
+    e2.isVietnameseMode = true
+    e2.deferredDiacritics = true
+    for char in "thana" { _ = e2.processKey(keyCode: keyCodeFor(char), isShift: false) }
+    try expect(e2.buffer.text, "thana")
+}
+
+// Flag off: today's behavior unchanged
+test("deferred off: regressions") {
+    try expect(typeDeferred("did", deferred: false), "did")
+    try expect(typeDeferred("thana", deferred: false), "thana")
+    try expect(typeDeferred("dend", deferred: false), "dend")
+    try expect(typeDeferred("data", deferred: false), "data")
+    try expect(typeDeferred("dongdo", deferred: false), "dongdo")
 }
 
 } // end runAllTests()

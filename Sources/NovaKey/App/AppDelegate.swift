@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine = TelexEngine()
         engine.isVietnameseMode = AppSettings.shared.isVietnameseMode
         engine.quickVietnamese = AppSettings.shared.quickVietnamese
+        engine.deferredDiacritics = AppSettings.shared.deferredDiacritics
         Log.info("Engine initialized, Vietnamese mode: \(engine.isVietnameseMode)")
 
         // Initialize event tap
@@ -183,6 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         eventTapManager.toggleHotkeyModifiers = CGEventFlags(rawValue: settings.toggleHotkeyModifiers)
         eventTapManager.switchWithFnKey = settings.switchWithFnKey
         engine.quickVietnamese = settings.quickVietnamese
+        engine.deferredDiacritics = settings.deferredDiacritics
     }
 
     private func showSettings() {
