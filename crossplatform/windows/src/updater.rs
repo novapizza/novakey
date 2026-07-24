@@ -139,6 +139,130 @@ pub fn verify_authenticode(path: &Path) -> bool {
     }
 }
 
+fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Fetch a whole https URL into a Vec<u8>. Returns None on any failure.
+fn http_get_bytes(url: &str) -> Option<Vec<u8>> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Networking::WinHttp::{
+        WinHttpCloseHandle, WinHttpConnect, WinHttpCrackUrl, WinHttpOpen, WinHttpOpenRequest,
+        WinHttpQueryDataAvailable, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
+        URL_COMPONENTS, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
+    };
+
+    let wide = to_wide(url);
+    unsafe {
+        // Split scheme/host/path with WinHttpCrackUrl.
+        let mut comp = URL_COMPONENTS {
+            dwStructSize: std::mem::size_of::<URL_COMPONENTS>() as u32,
+            dwSchemeLength: u32::MAX,
+            dwHostNameLength: u32::MAX,
+            dwUrlPathLength: u32::MAX,
+            dwExtraInfoLength: u32::MAX,
+            ..Default::default()
+        };
+        if WinHttpCrackUrl(&wide[..wide.len() - 1], 0, &mut comp).is_err() {
+            return None;
+        }
+        let host: Vec<u16> = std::slice::from_raw_parts(
+            comp.lpszHostName.0,
+            comp.dwHostNameLength as usize,
+        )
+        .to_vec();
+        let host_z: Vec<u16> = host.iter().copied().chain(std::iter::once(0)).collect();
+        let path: Vec<u16> = std::slice::from_raw_parts(
+            comp.lpszUrlPath.0,
+            (comp.dwUrlPathLength + comp.dwExtraInfoLength) as usize,
+        )
+        .to_vec();
+        let path_z: Vec<u16> = path.iter().copied().chain(std::iter::once(0)).collect();
+
+        let session = WinHttpOpen(
+            PCWSTR(to_wide("NovaKey-Updater/1.0").as_ptr()),
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            0,
+        );
+        if session.is_null() {
+            return None;
+        }
+        let conn = WinHttpConnect(session, PCWSTR(host_z.as_ptr()), comp.nPort, 0);
+        if conn.is_null() {
+            let _ = WinHttpCloseHandle(session);
+            return None;
+        }
+        let req = WinHttpOpenRequest(
+            conn,
+            PCWSTR(to_wide("GET").as_ptr()),
+            PCWSTR(path_z.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            std::ptr::null_mut(),
+            WINHTTP_FLAG_SECURE,
+        );
+        let cleanup = |r, c, s| {
+            let _ = WinHttpCloseHandle(r);
+            let _ = WinHttpCloseHandle(c);
+            let _ = WinHttpCloseHandle(s);
+        };
+        if req.is_null() {
+            cleanup(std::ptr::null_mut(), conn, session);
+            return None;
+        }
+        if WinHttpSendRequest(req, None, None, 0, 0, 0).is_err()
+            || WinHttpReceiveResponse(req, std::ptr::null_mut()).is_err()
+        {
+            cleanup(req, conn, session);
+            return None;
+        }
+        let mut out = Vec::new();
+        loop {
+            let mut avail: u32 = 0;
+            if WinHttpQueryDataAvailable(req, &mut avail).is_err() || avail == 0 {
+                break;
+            }
+            let mut buf = vec![0u8; avail as usize];
+            let mut read: u32 = 0;
+            if WinHttpReadData(
+                req,
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                avail,
+                &mut read,
+            )
+            .is_err()
+            {
+                break;
+            }
+            buf.truncate(read as usize);
+            out.extend_from_slice(&buf);
+        }
+        cleanup(req, conn, session);
+        Some(out)
+    }
+}
+
+/// Fetch a URL as UTF-8 text (the manifest).
+pub fn http_get_string(url: &str) -> Option<String> {
+    let bytes = http_get_bytes(url)?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Download a URL to a file. Returns whether it succeeded.
+pub fn download_to(url: &str, dest: &Path) -> bool {
+    match http_get_bytes(url) {
+        Some(bytes) if !bytes.is_empty() => {
+            if let Some(dir) = dest.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            std::fs::write(dest, bytes).is_ok()
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
