@@ -36,10 +36,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetMessageW, GetWindowThreadProcessId, PostQuitMessage, RegisterClassW, SetWindowsHookExW,
-    TranslateMessage, EVENT_SYSTEM_FOREGROUND, HMENU, HWND_MESSAGE, MB_OK, MSG,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_COMMAND, WM_DESTROY, WM_HOTKEY,
-    WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
+    GetMessageW, GetWindowThreadProcessId, PostMessageW, PostQuitMessage, RegisterClassW,
+    SetWindowsHookExW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, HMENU, HWND_MESSAGE, MB_OK,
+    MSG, WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
 };
 
 const HOTKEY_ID: i32 = 1;
@@ -83,6 +83,11 @@ unsafe fn run() {
                 Ok(h) => {
                     if GetLastError() == ERROR_ALREADY_EXISTS {
                         let _ = CloseHandle(h);
+                        if !finishing {
+                            // Normal launch, another instance is genuinely
+                            // running — exit instantly, no retry latency.
+                            return;
+                        }
                         std::thread::sleep(std::time::Duration::from_millis(200));
                         continue;
                     }
@@ -319,9 +324,21 @@ fn spawn_update_check(hwnd: HWND, background: bool) {
         let outcome = updater::check_now();
         match outcome {
             updater::UpdateOutcome::Applied => {
-                // New instance is launching; tear this one down cleanly.
+                // New instance is launching; tear this one down cleanly. Win32
+                // forbids destroying a window from a thread other than the one
+                // that created it (DestroyWindow would silently no-op here), so
+                // post WM_CLOSE instead — PostMessageW is documented safe across
+                // threads. The owning thread's wnd_proc has no WM_CLOSE arm, so
+                // it falls through to DefWindowProcW, which calls DestroyWindow
+                // on the owning (pump) thread, triggering the existing
+                // WM_DESTROY handler (tray::remove + PostQuitMessage).
                 unsafe {
-                    let _ = DestroyWindow(HWND(hwnd_val as *mut _));
+                    let _ = PostMessageW(
+                        HWND(hwnd_val as *mut _),
+                        WM_CLOSE,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
                 }
             }
             updater::UpdateOutcome::UpToDate if !background => {
