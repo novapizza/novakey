@@ -72,6 +72,35 @@ jobs:
           name: novakey-macos
           path: NovaKey-macos.zip
 
+      - name: Fetch Sparkle tools
+        run: |
+          set -euo pipefail
+          curl -L -o sparkle.tar.xz \
+            https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/Sparkle-2.6.4.tar.xz
+          mkdir sparkle && tar -xf sparkle.tar.xz -C sparkle
+
+      - name: Generate + sign appcast
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          R2_PUBLIC_BASE: ${{ secrets.R2_PUBLIC_BASE }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir feed && cp NovaKey-macos.zip feed/
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > ed_private.pem
+          # download-url-prefix points at the versioned R2 path for this tag.
+          ./sparkle/bin/generate_appcast \
+            --ed-key-file ed_private.pem \
+            --download-url-prefix "${R2_PUBLIC_BASE}/${TAG}/" \
+            feed
+          rm -f ed_private.pem
+          cp feed/appcast.xml appcast.xml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: novakey-appcast
+          path: appcast.xml
+
   # ── Windows: build Rust port + signtool + Azure Trusted Signing ───────────
   # Builds novakey-win (crossplatform/windows) → NovaKey.exe, signs via
   # Azure Trusted Signing, packages the zip.
