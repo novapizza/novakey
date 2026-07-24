@@ -6,8 +6,9 @@ use std::path::Path;
 
 use crate::settings;
 
-/// Fixed manifest URL. R2_PUBLIC_BASE is filled in Task 5.
-pub const FEED_URL: &str = "PLACEHOLDER_SET_IN_TASK_5";
+/// Fixed manifest URL.
+// TODO(release): set R2 public host before shipping
+pub const FEED_URL: &str = "https://REPLACE_WITH_R2_PUBLIC_BASE/latest/latest.json";
 
 /// This build's version, from Cargo. Never hardcode.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -90,7 +91,6 @@ pub fn sha256_hex(path: &Path) -> Option<String> {
 
 /// True when `path` carries a valid Authenticode signature that chains to a
 /// trusted root. Gates every downloaded exe before we launch it.
-#[allow(dead_code)]
 pub fn verify_authenticode(path: &Path) -> bool {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::HANDLE;
@@ -273,6 +273,131 @@ pub fn download_to(url: &str, dest: &Path) -> bool {
     }
 }
 
+#[derive(Debug)]
+pub enum UpdateOutcome {
+    UpToDate,
+    Applied,          // process is being replaced; caller should exit
+    Failed(&'static str),
+}
+
+/// Directory for staged downloads: %LOCALAPPDATA%\NovaKey\update
+fn staging_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    let mut p = std::path::PathBuf::from(base);
+    p.push("NovaKey");
+    p.push("update");
+    Some(p)
+}
+
+/// Full update pipeline. On success the running exe is renamed aside, the new
+/// exe takes its place, a fresh instance is spawned with `--finish-update`, and
+/// this function returns `Applied` so the caller can quit.
+pub fn check_now() -> UpdateOutcome {
+    let text = match http_get_string(FEED_URL) {
+        Some(t) => t,
+        None => return UpdateOutcome::Failed("fetch manifest"),
+    };
+    let remote = match parse_manifest(&text) {
+        Some(r) => r,
+        None => return UpdateOutcome::Failed("parse manifest"),
+    };
+    if !is_newer(CURRENT_VERSION, &remote.version) {
+        return UpdateOutcome::UpToDate;
+    }
+
+    let dir = match staging_dir() {
+        Some(d) => d,
+        None => return UpdateOutcome::Failed("staging dir"),
+    };
+    let zip_path = dir.join("NovaKey-windows.zip");
+    if !download_to(&remote.url, &zip_path) {
+        return UpdateOutcome::Failed("download");
+    }
+    // Integrity: manifest SHA-256 must match.
+    match sha256_hex(&zip_path) {
+        Some(h) if h.eq_ignore_ascii_case(&remote.sha256) => {}
+        _ => return UpdateOutcome::Failed("sha256 mismatch"),
+    }
+    // Extract NovaKey.exe from the zip.
+    let new_exe = dir.join("NovaKey-new.exe");
+    if !extract_exe(&zip_path, &new_exe) {
+        return UpdateOutcome::Failed("extract");
+    }
+    // Authenticity: new exe must pass Authenticode.
+    if !verify_authenticode(&new_exe) {
+        return UpdateOutcome::Failed("authenticode");
+    }
+    match swap_and_relaunch(&new_exe) {
+        true => UpdateOutcome::Applied,
+        false => UpdateOutcome::Failed("swap"),
+    }
+}
+
+/// Rename the running exe aside, move the new exe into its place, spawn a fresh
+/// instance with `--finish-update`. Windows allows renaming a running exe.
+fn swap_and_relaunch(new_exe: &Path) -> bool {
+    let cur = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let old = cur.with_extension("old.exe");
+    let _ = std::fs::remove_file(&old); // clear a stale one
+    if std::fs::rename(&cur, &old).is_err() {
+        return false;
+    }
+    if std::fs::rename(new_exe, &cur).is_err() {
+        // Roll back so we're never left without an exe.
+        let _ = std::fs::rename(&old, &cur);
+        return false;
+    }
+    // Spawn the replacement; it waits for our mutex to free, then deletes .old.
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    std::process::Command::new(&cur)
+        .arg("--finish-update")
+        .creation_flags(DETACHED_PROCESS)
+        .spawn()
+        .is_ok()
+}
+
+/// Extract the single `NovaKey.exe` entry from the release zip via the `zip`
+/// crate (see the Cargo.toml comment for why this is the one exception to
+/// the minimal-crate rule).
+fn extract_exe(zip_path: &Path, dest: &Path) -> bool {
+    let file = match std::fs::File::open(zip_path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let mut entry = match archive.by_name("NovaKey.exe") {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    let mut out = match std::fs::File::create(dest) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    std::io::copy(&mut entry, &mut out).is_ok()
+}
+
+/// Startup handler for the `--finish-update` relaunch: remove the leftover
+/// `NovaKey-old.exe`. Safe to call when nothing is pending.
+pub fn finish_pending_update() {
+    if let Ok(cur) = std::env::current_exe() {
+        let old = cur.with_extension("old.exe");
+        // The parent may still be exiting; retry briefly.
+        for _ in 0..25 {
+            if std::fs::remove_file(&old).is_ok() || !old.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +450,25 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn extracts_named_entry() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let zp = dir.join("novakey_extract_test.zip");
+        {
+            let f = std::fs::File::create(&zp).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            w.start_file("NovaKey.exe", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(b"MZ-fake-exe").unwrap();
+            w.finish().unwrap();
+        }
+        let out = dir.join("novakey_extract_out.exe");
+        assert!(super::extract_exe(&zp, &out));
+        assert_eq!(std::fs::read(&out).unwrap(), b"MZ-fake-exe");
+        let _ = std::fs::remove_file(&zp);
+        let _ = std::fs::remove_file(&out);
     }
 }

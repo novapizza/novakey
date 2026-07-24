@@ -11,6 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 novakey-core = { path = "../core" }
+# Exception to the minimal-crate rule: release zips are produced by
+# PowerShell Compress-Archive (deflate-compressed entries). Writing a
+# correct, safe deflate zip reader/writer by hand is not worth the risk
+# vs. the well-audited `zip` crate. Pulls only `flate2` transitively.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dependencies.windows]
 version = "0.58"
