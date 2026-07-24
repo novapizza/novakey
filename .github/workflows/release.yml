@@ -195,6 +195,26 @@ jobs:
           generate_release_notes: true
           files: dist/*.zip
 
+      - name: Build Windows update manifest (latest.json)
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          R2_PUBLIC_BASE: ${{ secrets.R2_PUBLIC_BASE }}
+        run: |
+          set -euo pipefail
+          VER="${TAG#v}"
+          SHA="$(sha256sum dist/NovaKey-windows.zip | cut -d' ' -f1)"
+          cat > dist/latest.json <<EOF
+          {
+            "version": "${VER}",
+            "windows": {
+              "url": "${R2_PUBLIC_BASE}/${TAG}/NovaKey-windows.zip",
+              "sha256": "${SHA}"
+            },
+            "notes": "See the GitHub release for ${TAG}."
+          }
+          EOF
+          cat dist/latest.json
+
       - name: Upload assets to Cloudflare R2
         env:
           TAG:                   ${{ github.event.inputs.tag || github.ref_name }}
@@ -211,4 +231,12 @@ jobs:
             base="$(basename "$f")"
             aws s3 cp "$f" "s3://${R2_BUCKET}/${TAG}/${base}" --endpoint-url "$ENDPOINT"
             aws s3 cp "$f" "s3://${R2_BUCKET}/latest/${base}"  --endpoint-url "$ENDPOINT"
+          done
+
+          # Update feeds: versioned copy + rolling latest.
+          for feed in latest.json appcast.xml; do
+            if [[ -f "dist/$feed" ]]; then
+              aws s3 cp "dist/$feed" "s3://${R2_BUCKET}/${TAG}/${feed}"  --endpoint-url "$ENDPOINT" --cache-control "no-cache"
+              aws s3 cp "dist/$feed" "s3://${R2_BUCKET}/latest/${feed}"  --endpoint-url "$ENDPOINT" --cache-control "no-cache"
+            fi
           done
