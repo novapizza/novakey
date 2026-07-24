@@ -896,8 +896,10 @@ fn spawn_update_check(hwnd: HWND, background: bool) {
         match outcome {
             updater::UpdateOutcome::Applied => {
                 // New instance is launching; tear this one down cleanly.
+                // MUST post, not call DestroyWindow directly: Win32 forbids
+                // destroying a window from a thread other than its creator.
                 unsafe {
-                    let _ = DestroyWindow(HWND(hwnd_val as *mut _));
+                    let _ = PostMessageW(HWND(hwnd_val as *mut _), WM_CLOSE, WPARAM(0), LPARAM(0));
                 }
             }
             updater::UpdateOutcome::UpToDate if !background => {
@@ -909,7 +911,7 @@ fn spawn_update_check(hwnd: HWND, background: bool) {
 }
 ```
 
-> The `DestroyWindow` from a worker thread posts `WM_DESTROY`/`WM_QUIT` to the owning thread's queue, which the pump in `run()` handles — that path already calls `tray::remove` + `PostQuitMessage`.
+> `PostMessageW(WM_CLOSE)` is thread-safe. `wnd_proc` has no `WM_CLOSE` arm, so it falls through to `DefWindowProcW` **on the pump thread**, whose default `WM_CLOSE` handling calls `DestroyWindow` there — triggering the existing `WM_DESTROY` arm (`tray::remove` + `PostQuitMessage`). Calling `DestroyWindow` directly from the worker thread would silently no-op and the old process would never exit.
 
 - [ ] **Step 5: Background check on launch (daily throttle)**
 
