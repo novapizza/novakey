@@ -59,10 +59,12 @@ if [[ -n "${SIGN_IDENTITY:-}" ]]; then
     # inside-out: nested code first, then the bundle. No --deep (Apple-discouraged).
     # Sparkle's nested helpers/XPC first (inside-out), then its framework.
     SPARKLE="$FRAMEWORKS/Sparkle.framework"
-    find "$SPARKLE/Versions/B" \( -name '*.xpc' -o -name '*.app' -o -type f -perm +111 \) \
-        -print0 2>/dev/null | while IFS= read -r -d '' item; do
-        codesign "${SIGN_ARGS[@]}" "$item" || true
-    done
+    if [[ -d "$SPARKLE/Versions/B" ]]; then
+        find "$SPARKLE/Versions/B" \( -name '*.xpc' -o -name '*.app' -o -type f -perm +111 \) \
+            -print0 2>/dev/null | while IFS= read -r -d '' item; do
+            codesign "${SIGN_ARGS[@]}" "$item" || true
+        done
+    fi
     codesign "${SIGN_ARGS[@]}" "$SPARKLE"
     codesign "${SIGN_ARGS[@]}" "$BIN"
     codesign "${SIGN_ARGS[@]}" "$APP"
@@ -71,10 +73,12 @@ else
     echo "▶ Signing (ad-hoc — local dev only, not distributable)..."
     # Sparkle's nested helpers/XPC first (inside-out), then its framework.
     SPARKLE="$FRAMEWORKS/Sparkle.framework"
-    find "$SPARKLE/Versions/B" \( -name '*.xpc' -o -name '*.app' -o -type f -perm +111 \) \
-        -print0 2>/dev/null | while IFS= read -r -d '' item; do
-        codesign --force --sign - --entitlements "$ENTITLEMENTS" --options runtime "$item" || true
-    done
+    if [[ -d "$SPARKLE/Versions/B" ]]; then
+        find "$SPARKLE/Versions/B" \( -name '*.xpc' -o -name '*.app' -o -type f -perm +111 \) \
+            -print0 2>/dev/null | while IFS= read -r -d '' item; do
+            codesign --force --sign - --entitlements "$ENTITLEMENTS" --options runtime "$item" || true
+        done
+    fi
     codesign --force --sign - --entitlements "$ENTITLEMENTS" --options runtime "$SPARKLE"
     codesign --force --sign - --entitlements "$ENTITLEMENTS" --options runtime "$BIN"
     codesign --force --sign - --entitlements "$ENTITLEMENTS" --options runtime "$APP"
