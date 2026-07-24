@@ -13,6 +13,7 @@ mod hotkey;
 mod sender;
 mod settings;
 mod tray;
+mod updater;
 mod ui;
 mod vk;
 

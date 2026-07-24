@@ -134,6 +134,19 @@ fn read_u32(text: &str, key: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// Read a `"key": "value"` string from our flat JSON (no escape handling —
+/// our manifests contain only plain URLs, hex, and short notes).
+pub fn read_str(text: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\"", key);
+    let idx = text.find(&needle)?;
+    let rest = &text[idx + needle.len()..];
+    let colon = rest.find(':')?;
+    let after = rest[colon + 1..].trim_start();
+    let after = after.strip_prefix('"')?;
+    let end = after.find('"')?;
+    Some(after[..end].to_string())
+}
+
 // MARK: - Autostart (HKCU Run)
 
 /// Add or remove the current executable from the per-user Run key.
