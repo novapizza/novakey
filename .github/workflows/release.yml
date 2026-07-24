@@ -75,7 +75,7 @@ jobs:
       - name: Fetch Sparkle tools
         run: |
           set -euo pipefail
-          curl -L -o sparkle.tar.xz \
+          curl -fL -o sparkle.tar.xz \
             https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/Sparkle-2.6.4.tar.xz
           mkdir sparkle && tar -xf sparkle.tar.xz -C sparkle
 
@@ -88,12 +88,12 @@ jobs:
           set -euo pipefail
           mkdir feed && cp NovaKey-macos.zip feed/
           printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > ed_private.pem
+          trap 'rm -f ed_private.pem' EXIT
           # download-url-prefix points at the versioned R2 path for this tag.
           ./sparkle/bin/generate_appcast \
             --ed-key-file ed_private.pem \
             --download-url-prefix "${R2_PUBLIC_BASE}/${TAG}/" \
             feed
-          rm -f ed_private.pem
           cp feed/appcast.xml appcast.xml
 
       - uses: actions/upload-artifact@v4
