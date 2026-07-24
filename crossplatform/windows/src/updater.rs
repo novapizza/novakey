@@ -219,9 +219,14 @@ fn http_get_bytes(url: &str) -> Option<Vec<u8>> {
             return None;
         }
         let mut out = Vec::new();
+        let mut ok = true;
         loop {
             let mut avail: u32 = 0;
-            if WinHttpQueryDataAvailable(req, &mut avail).is_err() || avail == 0 {
+            if WinHttpQueryDataAvailable(req, &mut avail).is_err() {
+                ok = false;
+                break;
+            }
+            if avail == 0 {
                 break;
             }
             let mut buf = vec![0u8; avail as usize];
@@ -234,13 +239,18 @@ fn http_get_bytes(url: &str) -> Option<Vec<u8>> {
             )
             .is_err()
             {
+                ok = false;
                 break;
             }
             buf.truncate(read as usize);
             out.extend_from_slice(&buf);
         }
         cleanup(req, conn, session);
-        Some(out)
+        if ok {
+            Some(out)
+        } else {
+            None
+        }
     }
 }
 
