@@ -13,6 +13,7 @@ final class StatusBarController {
 
     var onOpenSettings: (() -> Void)?
     var onQuit: (() -> Void)?
+    var onCheckForUpdates: (() -> Void)?
 
     init(engine: TelexEngine) {
         self.engine = engine
@@ -40,7 +41,11 @@ final class StatusBarController {
                 self?.closePopover()
                 self?.onOpenSettings?()
             },
-            onQuit: { [weak self] in self?.onQuit?() }
+            onQuit: { [weak self] in self?.onQuit?() },
+            onCheckForUpdates: { [weak self] in
+                self?.closePopover()
+                self?.onCheckForUpdates?()
+            }
         )
         popover.contentViewController = NSHostingController(rootView: rootView)
         popover.contentSize = NSSize(width: 280, height: 340)
@@ -134,6 +139,7 @@ struct MenuBarPopoverView: View {
     let onToggleMode: () -> Void
     let onOpenSettings: () -> Void
     let onQuit: () -> Void
+    let onCheckForUpdates: () -> Void
 
     @State private var isVietnamese: Bool = AppSettings.shared.isVietnameseMode
     @State private var hotkeyText: String = HotkeyManager.currentDescription
@@ -219,6 +225,9 @@ struct MenuBarPopoverView: View {
             ), action: onOpenSettings)
 
             MenuRow(title: "About NovaKey", trailing: AnyView(EmptyView()), action: {})
+
+            MenuRow(title: "Check for Updates…", trailing: AnyView(EmptyView()),
+                    action: onCheckForUpdates)
 
             Divider().background(Color.white.opacity(0.08)).padding(.vertical, 4)
 
