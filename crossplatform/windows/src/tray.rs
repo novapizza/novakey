@@ -33,6 +33,7 @@ pub const CMD_SETTINGS: usize = 6;
 pub const CMD_PLAYSOUND: usize = 7;
 pub const CMD_QUICKVN: usize = 8;
 pub const CMD_DEFERRED: usize = 9;
+pub const CMD_UPDATE: usize = 10;
 
 const TRAY_UID: u32 = 1;
 
@@ -136,6 +137,7 @@ pub fn show_menu(hwnd: HWND, enabled: bool, autostart: bool, step: bool, fix_aut
         let _ = AppendMenuW(menu, MF_STRING | check(autostart), CMD_AUTOSTART, w("Start with Windows"));
         let _ = AppendMenuW(menu, MF_STRING | check(step), CMD_STEP, w("Compatibility (step-by-step) mode"));
         let _ = AppendMenuW(menu, MF_STRING | check(fix_autocomplete), CMD_AUTOCOMPLETE, w("Fix browser URL autocomplete"));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, w("Check for Updates…"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w("Quit NovaKey"));
 

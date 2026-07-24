@@ -69,13 +69,37 @@ unsafe fn run() {
     // out before installing hooks or a second tray icon. The handle is held for
     // the process lifetime (Windows frees it on exit); we never signal it.
     let mutex_name = wide("Local\\NovaKeySingleInstanceMutex");
-    let _instance_mutex = match CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr())) {
-        Ok(h) => h,
-        Err(_) => return,
+
+    // `--finish-update` means we are the freshly-swapped-in exe relaunched by
+    // the updater; the exiting parent may still hold the mutex briefly, so
+    // retry for a few seconds instead of bailing immediately.
+    let finishing = std::env::args().any(|a| a == "--finish-update");
+
+    let _instance_mutex = {
+        let mut handle = None;
+        let attempts = if finishing { 25 } else { 1 };
+        for _ in 0..attempts {
+            match CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr())) {
+                Ok(h) => {
+                    if GetLastError() == ERROR_ALREADY_EXISTS {
+                        let _ = CloseHandle(h);
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        continue;
+                    }
+                    handle = Some(h);
+                    break;
+                }
+                Err(_) => return,
+            }
+        }
+        match handle {
+            Some(h) => h,
+            None => return, // another instance genuinely running
+        }
     };
-    if GetLastError() == ERROR_ALREADY_EXISTS {
-        // Another instance owns the mutex — exit quietly.
-        return;
+
+    if finishing {
+        updater::finish_pending_update();
     }
 
     // Load persisted settings and apply them.
@@ -144,6 +168,23 @@ unsafe fn run() {
 
     // Tray icon.
     tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc());
+
+    // Background update check: at most once every 24h, silent unless it applies.
+    {
+        let last = SETTINGS.with(|s| s.borrow().last_update_check);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if now.saturating_sub(last) > 86_400 {
+            SETTINGS.with(|s| {
+                let mut s = s.borrow_mut();
+                s.last_update_check = now;
+                s.save();
+            });
+            spawn_update_check(hwnd, /*background=*/ true);
+        }
+    }
 
     // Seed the browser flag from the currently-focused window.
     hook::set_is_browser(window_is_browser(GetForegroundWindow()));
@@ -270,6 +311,29 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
+/// Run the update check on a worker thread. `background` suppresses the
+/// "already up to date" and failure notifications.
+fn spawn_update_check(hwnd: HWND, background: bool) {
+    let hwnd_val = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        let outcome = updater::check_now();
+        match outcome {
+            updater::UpdateOutcome::Applied => {
+                // New instance is launching; tear this one down cleanly.
+                unsafe {
+                    let _ = DestroyWindow(HWND(hwnd_val as *mut _));
+                }
+            }
+            updater::UpdateOutcome::UpToDate if !background => {
+                unsafe {
+                    let _ = MessageBeep(MB_OK);
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
 unsafe fn do_toggle(hwnd: HWND) {
     let new = hook::toggle_enabled();
     let play = SETTINGS.with(|s| {
@@ -385,6 +449,7 @@ unsafe fn handle_command(hwnd: HWND, cmd: usize) {
             });
             hook::set_fix_autocomplete(new);
         }
+        tray::CMD_UPDATE => spawn_update_check(hwnd, /*background=*/ false),
         tray::CMD_QUIT => {
             let _ = DestroyWindow(hwnd);
         }
