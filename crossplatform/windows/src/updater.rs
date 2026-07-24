@@ -3,8 +3,14 @@
 
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::settings;
+
+/// Guards against concurrent `check_now()` runs (background daily check
+/// racing a manual "Check for Updates..." click, or a double-click). Only
+/// one worker may proceed at a time; a second caller gets a benign no-op.
+static UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Fixed manifest URL.
 // TODO(release): set R2 public host before shipping
@@ -293,43 +299,72 @@ fn staging_dir() -> Option<std::path::PathBuf> {
 /// exe takes its place, a fresh instance is spawned with `--finish-update`, and
 /// this function returns `Applied` so the caller can quit.
 pub fn check_now() -> UpdateOutcome {
+    // Claim the single in-progress slot. If another check_now is already
+    // running (background daily check vs. a manual click), do nothing —
+    // the other runner owns the flag and will clear it on its own exit.
+    if UPDATE_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return UpdateOutcome::UpToDate;
+    }
+
     let text = match http_get_string(FEED_URL) {
         Some(t) => t,
-        None => return UpdateOutcome::Failed("fetch manifest"),
+        None => {
+            UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
+            return UpdateOutcome::Failed("fetch manifest");
+        }
     };
     let remote = match parse_manifest(&text) {
         Some(r) => r,
-        None => return UpdateOutcome::Failed("parse manifest"),
+        None => {
+            UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
+            return UpdateOutcome::Failed("parse manifest");
+        }
     };
     if !is_newer(CURRENT_VERSION, &remote.version) {
+        UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
         return UpdateOutcome::UpToDate;
     }
 
     let dir = match staging_dir() {
         Some(d) => d,
-        None => return UpdateOutcome::Failed("staging dir"),
+        None => {
+            UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
+            return UpdateOutcome::Failed("staging dir");
+        }
     };
     let zip_path = dir.join("NovaKey-windows.zip");
     if !download_to(&remote.url, &zip_path) {
+        UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
         return UpdateOutcome::Failed("download");
     }
     // Integrity: manifest SHA-256 must match.
     match sha256_hex(&zip_path) {
         Some(h) if h.eq_ignore_ascii_case(&remote.sha256) => {}
-        _ => return UpdateOutcome::Failed("sha256 mismatch"),
+        _ => {
+            UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
+            return UpdateOutcome::Failed("sha256 mismatch");
+        }
     }
     // Extract NovaKey.exe from the zip.
     let new_exe = dir.join("NovaKey-new.exe");
     if !extract_exe(&zip_path, &new_exe) {
+        UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
         return UpdateOutcome::Failed("extract");
     }
     // Authenticity: new exe must pass Authenticode.
     if !verify_authenticode(&new_exe) {
+        UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
         return UpdateOutcome::Failed("authenticode");
     }
     match swap_and_relaunch(&new_exe) {
         true => UpdateOutcome::Applied,
-        false => UpdateOutcome::Failed("swap"),
+        false => {
+            UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
+            UpdateOutcome::Failed("swap")
+        }
     }
 }
 
@@ -450,6 +485,34 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn guard_rejects_concurrent_claim_until_released() {
+        // Exercises the same compare_exchange check_now() uses, in isolation
+        // (check_now itself does network I/O so isn't unit-testable here).
+        // Reset first in case another test in this process left it set.
+        UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
+
+        // First claim succeeds (mirrors entering check_now).
+        assert!(UPDATE_IN_PROGRESS
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok());
+
+        // A second concurrent claim must fail while the first is in progress.
+        assert!(UPDATE_IN_PROGRESS
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err());
+
+        // Release (mirrors a non-Applied return path), then a fresh claim
+        // succeeds again.
+        UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
+        assert!(UPDATE_IN_PROGRESS
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok());
+
+        // Clean up so other tests in this process aren't affected.
+        UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
     }
 
     #[test]
