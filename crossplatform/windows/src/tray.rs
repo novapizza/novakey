@@ -1,6 +1,8 @@
 //! tray.rs
 //! System-tray icon (`Shell_NotifyIcon`) and its right-click context menu.
 
+use std::cell::Cell;
+
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -9,10 +11,12 @@ use windows::Win32::UI::Shell::{
     NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, SetForegroundWindow,
-    TrackPopupMenu, HICON, HMENU, IDI_APPLICATION, MF_CHECKED, MF_SEPARATOR, MF_STRING,
-    MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON,
+    AppendMenuW, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos, LoadIconW,
+    SetForegroundWindow, TrackPopupMenu, HICON, HMENU, IDI_APPLICATION, MF_CHECKED, MF_SEPARATOR,
+    MF_STRING, MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON,
 };
+
+use crate::badge;
 
 /// Resource id of the embedded application icon (see build.rs).
 pub const APP_ICON_ID: u16 = 1;
@@ -59,13 +63,40 @@ pub fn app_icon() -> HICON {
     load_icon(APP_ICON_ID)
 }
 
-/// Pick the tray icon for the current state: the "V" variant when Vietnamese
-/// input is enabled, the plain icon otherwise.
-fn tray_icon(enabled: bool) -> HICON {
-    load_icon(if enabled { APP_ICON_V_ID } else { APP_ICON_ID })
+thread_local! {
+    /// The badge icon currently handed to the shell. Kept alive until the next
+    /// update replaces it, then destroyed — the shell copies the bitmap on
+    /// NIM_ADD/NIM_MODIFY, but freeing it before the call returns is unsafe.
+    static LIVE_BADGE: Cell<isize> = const { Cell::new(0) };
 }
 
-fn base_data(hwnd: HWND, enabled: bool) -> NOTIFYICONDATAW {
+/// Pick the tray icon for the current state: a freshly drawn "V" badge when
+/// Vietnamese input is enabled, an "E" badge otherwise. The bool is true when
+/// we own the handle (drawn at runtime); false means it's a shared resource
+/// icon fallback, which must never be destroyed.
+fn tray_icon(enabled: bool) -> (HICON, bool) {
+    match badge::create(enabled) {
+        Some(icon) => (icon, true),
+        None => (
+            load_icon(if enabled { APP_ICON_V_ID } else { APP_ICON_ID }),
+            false,
+        ),
+    }
+}
+
+/// Remember the badge we just published and release the one it replaced.
+fn retire_previous_badge(current: isize) {
+    LIVE_BADGE.with(|slot| {
+        let prev = slot.replace(current);
+        if prev != 0 && prev != current {
+            unsafe {
+                let _ = DestroyIcon(HICON(prev as *mut _));
+            }
+        }
+    });
+}
+
+fn base_data(hwnd: HWND, enabled: bool) -> (NOTIFYICONDATAW, isize) {
     let mut data = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
@@ -74,8 +105,9 @@ fn base_data(hwnd: HWND, enabled: bool) -> NOTIFYICONDATAW {
     };
     data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     data.uCallbackMessage = WM_TRAY;
-    data.hIcon = tray_icon(enabled);
-    data
+    let (icon, owned) = tray_icon(enabled);
+    data.hIcon = icon;
+    (data, if owned { icon.0 as isize } else { 0 })
 }
 
 fn set_tip(data: &mut NOTIFYICONDATAW, tip: &str) {
@@ -86,20 +118,22 @@ fn set_tip(data: &mut NOTIFYICONDATAW, tip: &str) {
 
 /// Add the tray icon.
 pub fn add(hwnd: HWND, enabled: bool, hotkey: &str) {
-    let mut data = base_data(hwnd, enabled);
+    let (mut data, owned) = base_data(hwnd, enabled);
     set_tip(&mut data, &tip_for(enabled, hotkey));
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &data);
     }
+    retire_previous_badge(owned);
 }
 
 /// Update the tooltip and icon to reflect the current on/off state and hotkey.
 pub fn update(hwnd: HWND, enabled: bool, hotkey: &str) {
-    let mut data = base_data(hwnd, enabled);
+    let (mut data, owned) = base_data(hwnd, enabled);
     set_tip(&mut data, &tip_for(enabled, hotkey));
     unsafe {
         let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
     }
+    retire_previous_badge(owned);
 }
 
 /// Remove the tray icon (on quit).
@@ -113,6 +147,7 @@ pub fn remove(hwnd: HWND) {
     unsafe {
         let _ = Shell_NotifyIconW(NIM_DELETE, &data);
     }
+    retire_previous_badge(0);
 }
 
 fn tip_for(enabled: bool, hotkey: &str) -> String {
