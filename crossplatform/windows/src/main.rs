@@ -8,6 +8,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod badge;
 mod hook;
 mod hotkey;
 mod sender;
@@ -35,10 +36,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetMessageW, GetWindowThreadProcessId, PostQuitMessage, RegisterClassW, SetWindowsHookExW,
-    TranslateMessage, EVENT_SYSTEM_FOREGROUND, HMENU, HWND_MESSAGE, MB_OK, MSG,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_COMMAND, WM_DESTROY, WM_HOTKEY,
-    WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
+    GetMessageW, GetWindowThreadProcessId, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
+    SetWindowsHookExW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, HMENU, HWND_MESSAGE, MB_OK, MSG,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_COMMAND, WM_DESTROY, WM_DPICHANGED,
+    WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW,
 };
 
 const HOTKEY_ID: i32 = 1;
@@ -260,13 +261,40 @@ unsafe extern "system" fn wnd_proc(
             handle_command(hwnd, cmd);
             LRESULT(0)
         }
+        // Light/dark switch or a DPI change alters how the badge should be
+        // drawn (letter colour, icon size), so redraw it.
+        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_DPICHANGED => {
+            tray::update(hwnd, hook::is_enabled(), &current_hotkey_desc());
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_DESTROY => {
             tray::remove(hwnd);
             PostQuitMessage(0);
             LRESULT(0)
         }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        _ => {
+            // Explorer restarted and dropped every tray icon: publish ours again.
+            if msg != 0 && msg == taskbar_created_msg() {
+                tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc());
+                return LRESULT(0);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
     }
+}
+
+/// The shell's "TaskbarCreated" broadcast message id (0 if registration fails).
+fn taskbar_created_msg() -> u32 {
+    thread_local! {
+        static ID: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
+    }
+    ID.with(|id| {
+        if id.get() == u32::MAX {
+            let name = wide("TaskbarCreated");
+            id.set(unsafe { RegisterWindowMessageW(PCWSTR(name.as_ptr())) });
+        }
+        id.get()
+    })
 }
 
 unsafe fn do_toggle(hwnd: HWND) {
