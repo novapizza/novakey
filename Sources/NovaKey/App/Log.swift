@@ -29,6 +29,24 @@ enum Log {
         return f
     }()
 
+    /// Whether per-keystroke `verbose` logging is emitted.
+    ///
+    /// `debug` is compiled out of release builds, which is exactly the build a
+    /// user runs when reporting a bug. This flag turns the detailed logs on in
+    /// *any* build without a rebuild, and is read once at launch so the hot path
+    /// only ever tests a stored Bool:
+    ///
+    ///   defaults write com.novakey.inputmethod verboseLogging -bool true
+    ///   # or, when launching from a terminal:  NOVAKEY_VERBOSE=1 open -a NovaKey
+    ///
+    /// Off by default: it writes a few lines per keystroke.
+    static let verboseEnabled: Bool = {
+        if let env = ProcessInfo.processInfo.environment["NOVAKEY_VERBOSE"] {
+            return env == "1" || env.lowercased() == "true"
+        }
+        return UserDefaults.standard.bool(forKey: "verboseLogging")
+    }()
+
     static func setup() {
         // Create log directory with user-only permissions (0700)
         let fm = FileManager.default
@@ -42,7 +60,8 @@ enum Log {
         queue.async {
             handle = FileHandle(forWritingAtPath: logFile)
         }
-        info("=== NovaKey Log Started ===")
+        info("=== NovaKey Log Started === (verbose: \(verboseEnabled))")
+        info("Log file: \(logFile)")
     }
 
     static func info(_ message: String) {
@@ -59,6 +78,13 @@ enum Log {
         #if DEBUG
         write("DEBUG", message())
         #endif
+    }
+
+    /// Per-keystroke detail, in any build, when `verboseEnabled` is set.
+    /// Autoclosure so the string isn't built when verbose logging is off.
+    static func verbose(_ message: @autoclosure () -> String) {
+        guard verboseEnabled else { return }
+        write("VERBOSE", message())
     }
 
     private static func write(_ level: String, _ message: String) {
