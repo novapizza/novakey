@@ -3,6 +3,7 @@
 // Handles lifecycle: create, enable, disable, destroy, sleep/wake recovery.
 
 import Cocoa
+import Carbon // IsSecureEventInputEnabled()
 
 /// Manages the CGEventTap lifecycle and integrates it with the run loop.
 final class EventTapManager {
@@ -11,6 +12,36 @@ final class EventTapManager {
     private var runLoopSource: CFRunLoopSource?
     private var retainedSelf: Unmanaged<EventTapManager>?
     private(set) var isRunning = false
+
+    /// How often the watchdog polls the tap's enabled state.
+    private static let healthCheckInterval: TimeInterval = 2.0
+
+    /// Tap callbacks slower than this are logged — a slow callback is what makes
+    /// macOS disable the tap in the first place.
+    private static let slowCallbackThreshold: TimeInterval = 0.100
+
+    /// Watchdog timer; created only once `start()` succeeds, torn down in `stop()`.
+    private var healthTimer: Timer?
+
+    /// Diagnostics counters (see `logDiagnostics()`).
+    private(set) var timeoutNotificationCount = 0
+    private(set) var watchdogRecoveryCount = 0
+    private(set) var slowCallbackCount = 0
+
+    /// Dump state every ~30s (15 * 2s) so a user's log shows what the tap was
+    /// doing at the moment input died, without needing them to reproduce on cue.
+    private static let diagnosticsEveryNChecks = 15
+    private var healthChecksSinceDiag = 0
+
+    /// Key-downs the tap has actually received. `keyDownsSinceDiag` resets on
+    /// every diagnostics dump: if it stays 0 while the user is typing, events
+    /// aren't reaching the tap at all (secure input, or a wedged main thread) --
+    /// which no amount of re-enabling can fix.
+    private(set) var keyDownCount = 0
+    private var keyDownsSinceDiag = 0
+
+    /// Last observed secure-input state, so the watchdog can log transitions.
+    private var lastSecureInputState = false
 
     let sourceManager: EventSourceManager
     let engine: TelexEngine
@@ -109,7 +140,9 @@ final class EventTapManager {
         CGEvent.tapEnable(tap: tap, enable: true)
 
         isRunning = true
-        Log.info("Event tap STARTED (stateID: \(sourceManager.stateID))")
+        lastSecureInputState = IsSecureEventInputEnabled()
+        startHealthTimer()
+        Log.info("Event tap STARTED (stateID: \(sourceManager.stateID), secureInput: \(lastSecureInputState))")
         return true
     }
 
@@ -117,11 +150,18 @@ final class EventTapManager {
     func stop() {
         guard isRunning else { return }
 
+        healthTimer?.invalidate()
+        healthTimer = nil
+
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
         }
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
+            // Disabling alone leaves the mach port alive. `start()` creates a
+            // fresh tap, so without invalidating here every stop/start cycle
+            // (notably sleep/wake) would leak a port for the app's lifetime.
+            CFMachPortInvalidate(tap)
         }
 
         runLoopSource = nil
@@ -136,21 +176,136 @@ final class EventTapManager {
     }
 
     /// Re-enable the event tap if macOS disabled it due to timeout.
+    ///
+    /// Always resets the engine session first: while the tap was dead the user's
+    /// keystrokes reached the app without us seeing them, so the syllable buffer
+    /// no longer matches what's on screen. Replaying a replacement against a
+    /// stale buffer would backspace over the wrong characters.
     func reenable() {
         guard let tap = eventTap else { return }
+        engine.resetSession()
         CGEvent.tapEnable(tap: tap, enable: true)
         Log.info("Event tap re-enabled after system timeout")
     }
 
+    // MARK: - Watchdog
+
+    private func startHealthTimer() {
+        healthTimer?.invalidate()
+        let timer = Timer(timeInterval: Self.healthCheckInterval, repeats: true) { [weak self] _ in
+            self?.checkHealth()
+        }
+        // .common so the watchdog keeps firing during modal/tracking run loops
+        // (menu open, alert up) — the same modes the tap source is added in.
+        RunLoop.main.add(timer, forMode: .common)
+        healthTimer = timer
+    }
+
+    /// Poll the tap's enabled state and revive it if macOS disabled it.
+    ///
+    /// The reactive `.tapDisabledByTimeout` handling in `handleEvent` is the
+    /// fastest path, but it only runs if that notification is actually delivered
+    /// to our callback. If it's missed, nothing else re-enables the tap and
+    /// Vietnamese input stays dead until NovaKey is relaunched. This is the
+    /// backstop for that case.
+    func checkHealth() {
+        guard isRunning, let tap = eventTap else { return }
+
+        // Secure input can flip without the tap's state changing at all, so
+        // check it on every pass and log the edges. A transition to `true` that
+        // never comes back is the "typing died in Terminal" smoking gun.
+        let secureNow = IsSecureEventInputEnabled()
+        if secureNow != lastSecureInputState {
+            lastSecureInputState = secureNow
+            let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
+            Log.info("SECURE INPUT \(secureNow ? "ENABLED" : "disabled") (frontmost: \(frontmost)) -- while active, NO event tap receives key events")
+        }
+
+        guard !CGEvent.tapIsEnabled(tap: tap) else {
+            // Tap looks healthy -- but "healthy" is exactly what a secure-input
+            // or hung-main-thread failure also looks like, so dump state
+            // periodically regardless. `keysSeen` is the discriminator: zero
+            // while the user is typing means events aren't reaching us at all.
+            healthChecksSinceDiag += 1
+            if healthChecksSinceDiag >= Self.diagnosticsEveryNChecks {
+                healthChecksSinceDiag = 0
+                logDiagnostics(context: "periodic")
+            }
+            return
+        }
+
+        let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
+        let secureInput = IsSecureEventInputEnabled()
+        Log.error("WATCHDOG: tap found DISABLED (frontmost: \(frontmost), secureInput: \(secureInput)) -- reviving")
+
+        // Same stale-buffer reasoning as `reenable()`.
+        engine.resetSession()
+        CGEvent.tapEnable(tap: tap, enable: true)
+        watchdogRecoveryCount += 1
+
+        if CGEvent.tapIsEnabled(tap: tap) {
+            Log.info("WATCHDOG: tap re-enabled (recoveries: \(watchdogRecoveryCount))")
+        } else {
+            Log.error("WATCHDOG: tapEnable did NOT stick -- tap still disabled")
+        }
+    }
+
+    /// Dump the diagnostic counters plus the current secure-input state.
+    ///
+    /// Secure Keyboard Entry (Terminal.app/iTerm2, and any password field) blocks
+    /// key events from reaching *every* event tap while leaving the tap reporting
+    /// itself as enabled — so a healthy-looking tap that receives nothing is the
+    /// signature of that state, and this log line is our only visibility into it.
+    /// Note it belongs to whichever process turned it on: relaunching NovaKey
+    /// cannot clear it.
+    func logDiagnostics(context: String) {
+        let keysSeen = keyDownsSinceDiag
+        keyDownsSinceDiag = 0
+        Log.info("""
+            DIAG(\(context)): running=\(isRunning) \
+            enabled=\(eventTap.map { CGEvent.tapIsEnabled(tap: $0) }.map(String.init) ?? "no-tap") \
+            secureInput=\(IsSecureEventInputEnabled()) \
+            vi=\(engine.isVietnameseMode) \
+            frontmost=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?") \
+            keysSeen=\(keysSeen) keysTotal=\(keyDownCount) \
+            timeouts=\(timeoutNotificationCount) \
+            watchdogRecoveries=\(watchdogRecoveryCount) \
+            slowCallbacks=\(slowCallbackCount)
+            """)
+    }
+
     // MARK: - Event Processing
 
-    /// Called from the global C callback. Processes a single event.
-    /// Returns nil to suppress the event, or the (possibly modified) event to pass through.
+    /// Called from the global C callback. Times the real work so we can spot the
+    /// slow callbacks that get the tap disabled in the first place.
     func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        let started = CFAbsoluteTimeGetCurrent()
+        let result = processEvent(proxy: proxy, type: type, event: event)
+        let elapsed = CFAbsoluteTimeGetCurrent() - started
+
+        if elapsed > Self.slowCallbackThreshold {
+            slowCallbackCount += 1
+            let ms = Int(elapsed * 1000)
+            let count = slowCallbackCount
+            // Resolving the frontmost app is itself not free, and the file write
+            // is already deferred by Log — keep both off the hot path entirely.
+            DispatchQueue.main.async {
+                let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
+                Log.error("SLOW tap callback: \(ms)ms type=\(type.rawValue) frontmost=\(frontmost) (total: \(count))")
+            }
+        }
+        return result
+    }
+
+    /// Processes a single event.
+    /// Returns nil to suppress the event, or the (possibly modified) event to pass through.
+    private func processEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let passThrough = Unmanaged.passUnretained(event)
 
         // Handle tap disabled by system timeout
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            timeoutNotificationCount += 1
+            Log.error("Tap disabled by \(type == .tapDisabledByTimeout ? "timeout" : "user input") (count: \(timeoutNotificationCount))")
             reenable()
             return passThrough
         }
@@ -191,18 +346,22 @@ final class EventTapManager {
             return passThrough
         }
 
+        keyDownCount += 1
+        keyDownsSinceDiag += 1
+
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
-        #if DEBUG
-        let keyChar = KeyCode(rawValue: keyCode)?.asciiLetter.map(String.init) ?? "?"
-        let flagStr = [
-            flags.contains(.maskShift) ? "Shift" : nil,
-            flags.contains(.maskControl) ? "Ctrl" : nil,
-            flags.contains(.maskAlternate) ? "Opt" : nil,
-            flags.contains(.maskCommand) ? "Cmd" : nil,
-        ].compactMap { $0 }.joined(separator: "+")
-        Log.debug("keyDown: \(keyChar) (0x\(String(keyCode, radix: 16))) flags=[\(flagStr)] vi=\(engine.isVietnameseMode)")
-        #endif
+        Log.verbose({
+            let keyChar = KeyCode(rawValue: keyCode)?.asciiLetter.map(String.init) ?? "?"
+            let flagStr = [
+                flags.contains(.maskShift) ? "Shift" : nil,
+                flags.contains(.maskAlphaShift) ? "Caps" : nil,
+                flags.contains(.maskControl) ? "Ctrl" : nil,
+                flags.contains(.maskAlternate) ? "Opt" : nil,
+                flags.contains(.maskCommand) ? "Cmd" : nil,
+            ].compactMap { $0 }.joined(separator: "+")
+            return "keyDown: \(keyChar) (0x\(String(keyCode, radix: 16))) flags=[\(flagStr)] vi=\(engine.isVietnameseMode) buffer='\(engine.buffer.text)'"
+        }())
 
         // Check for hotkey toggle (Option+Z by default)
         if isToggleHotkey(keyCode: keyCode, flags: flags) {
@@ -232,14 +391,14 @@ final class EventTapManager {
             return passThrough
 
         case .replace(let bs, let text):
-            Log.debug("REPLACE: \(bs) backspaces + '\(text)'")
+            Log.verbose("REPLACE: \(bs) backspaces + '\(text)' (browser=\(keySender.browserKind), flicker=\(keySender.reduceFlicker))")
             keySender.execute(result: result, proxy: proxy)
             return nil
 
         case .restore(let bs, let text):
             // Invalid syllable at word-break: emit the raw-keystroke restore
             // synthetically, then let the original word-break key pass through.
-            Log.debug("RESTORE: \(bs) backspaces + '\(text)'")
+            Log.verbose("RESTORE: \(bs) backspaces + '\(text)'")
             keySender.execute(result: .replace(backspaces: bs, text: text), proxy: proxy)
             return passThrough
         }

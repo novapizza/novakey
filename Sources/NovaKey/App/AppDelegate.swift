@@ -83,6 +83,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         browserWatcher.onFlickerProneChange = { [weak self] prone in
             self?.eventTapManager.keySender.reduceFlicker = prone
         }
+        // Every app switch: the syllable buffer describes text in the app we just
+        // left, so drop it, and take the opportunity to verify the tap is still
+        // alive. NovaKey is LSUIElement and never becomes active itself, so
+        // applicationDidBecomeActive is not a usable hook for this.
+        browserWatcher.onActivate = { [weak self] _ in
+            guard let self else { return }
+            self.engine.resetSession()
+            self.eventTapManager?.checkHealth()
+        }
         browserWatcher.start()
         eventTapManager.keySender.browserKind = browserWatcher.kind
         eventTapManager.keySender.reduceFlicker = browserWatcher.isFlickerProne
@@ -135,6 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if eventTapManager.start() {
             Log.info("Event tap started OK")
+            eventTapManager.logDiagnostics(context: "start")
             permissionsWindow?.close()
             permissionsWindow = nil
         } else {
@@ -231,13 +241,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Sleep / Wake
 
     @objc private func handleSleep(_ notification: Notification) {
+        eventTapManager?.logDiagnostics(context: "sleep")
         eventTapManager?.stop()
         Log.info("Stopped for sleep")
     }
 
     @objc private func handleWake(_ notification: Notification) {
+        Log.info("Woke from sleep -- restarting tap in 1s")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.startEventTap()
+            self?.eventTapManager?.logDiagnostics(context: "wake")
         }
     }
 
