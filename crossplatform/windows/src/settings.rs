@@ -32,6 +32,8 @@ pub struct Settings {
     pub hotkey_mods: u32,
     /// Language-toggle hotkey virtual-key code.
     pub hotkey_vk: u32,
+    /// Unix timestamp (seconds) of the last background update check.
+    pub last_update_check: u64,
 }
 
 impl Default for Settings {
@@ -46,6 +48,7 @@ impl Default for Settings {
             deferred_diacritics: false,
             hotkey_mods: hotkey::DEFAULT_MODS,
             hotkey_vk: hotkey::DEFAULT_VK,
+            last_update_check: 0,
         }
     }
 }
@@ -77,6 +80,8 @@ impl Settings {
                     read_bool(&text, "deferredDiacritics").unwrap_or(s.deferred_diacritics);
                 s.hotkey_mods = read_u32(&text, "hotkeyMods").unwrap_or(s.hotkey_mods);
                 s.hotkey_vk = read_u32(&text, "hotkeyVk").unwrap_or(s.hotkey_vk);
+                s.last_update_check =
+                    read_u64(&text, "lastUpdateCheck").unwrap_or(s.last_update_check);
             }
         }
         s
@@ -88,7 +93,7 @@ impl Settings {
                 let _ = fs::create_dir_all(dir);
             }
             let json = format!(
-                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {},\n  \"playSound\": {},\n  \"quickVietnamese\": {},\n  \"deferredDiacritics\": {},\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {}\n}}\n",
+                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {},\n  \"playSound\": {},\n  \"quickVietnamese\": {},\n  \"deferredDiacritics\": {},\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {},\n  \"lastUpdateCheck\": {}\n}}\n",
                 self.enabled,
                 self.step_by_step,
                 self.start_with_windows,
@@ -97,7 +102,8 @@ impl Settings {
                 self.quick_vietnamese,
                 self.deferred_diacritics,
                 self.hotkey_mods,
-                self.hotkey_vk
+                self.hotkey_vk,
+                self.last_update_check
             );
             let _ = fs::write(&path, json);
         }
@@ -132,6 +138,34 @@ fn read_u32(text: &str, key: &str) -> Option<u32> {
         .take_while(|c| c.is_ascii_digit())
         .collect();
     digits.parse().ok()
+}
+
+/// Read a non-negative 64-bit integer value for `"key": 123` from our flat
+/// JSON. Mirrors `read_u32` for wider values (e.g. Unix timestamps).
+fn read_u64(text: &str, key: &str) -> Option<u64> {
+    let needle = format!("\"{}\"", key);
+    let idx = text.find(&needle)?;
+    let rest = &text[idx + needle.len()..];
+    let colon = rest.find(':')?;
+    let digits: String = rest[colon + 1..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// Read a `"key": "value"` string from our flat JSON (no escape handling —
+/// our manifests contain only plain URLs, hex, and short notes).
+pub fn read_str(text: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\"", key);
+    let idx = text.find(&needle)?;
+    let rest = &text[idx + needle.len()..];
+    let colon = rest.find(':')?;
+    let after = rest[colon + 1..].trim_start();
+    let after = after.strip_prefix('"')?;
+    let end = after.find('"')?;
+    Some(after[..end].to_string())
 }
 
 // MARK: - Autostart (HKCU Run)
@@ -236,5 +270,12 @@ mod tests {
         );
         assert_eq!(read_u32(&json, "hotkeyMods"), Some(6));
         assert_eq!(read_u32(&json, "hotkeyVk"), Some(0x5A));
+    }
+
+    #[test]
+    fn parses_u64_timestamp() {
+        let json = "{\n  \"lastUpdateCheck\": 1750000000\n}";
+        assert_eq!(read_u64(json, "lastUpdateCheck"), Some(1_750_000_000));
+        assert_eq!(read_u64(json, "missing"), None);
     }
 }

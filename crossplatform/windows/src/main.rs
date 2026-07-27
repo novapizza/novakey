@@ -14,6 +14,7 @@ mod hotkey;
 mod sender;
 mod settings;
 mod tray;
+mod updater;
 mod ui;
 mod vk;
 
@@ -36,10 +37,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetMessageW, GetWindowThreadProcessId, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
-    SetWindowsHookExW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, HMENU, HWND_MESSAGE, MB_OK, MSG,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_COMMAND, WM_DESTROY, WM_DPICHANGED,
-    WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW,
+    GetMessageW, GetWindowThreadProcessId, MessageBoxW, PostMessageW, PostQuitMessage,
+    RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW, TranslateMessage,
+    EVENT_SYSTEM_FOREGROUND, HMENU, HWND_MESSAGE, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MSG,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_DPICHANGED, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED,
+    WNDCLASSW,
 };
 
 const HOTKEY_ID: i32 = 1;
@@ -69,13 +72,42 @@ unsafe fn run() {
     // out before installing hooks or a second tray icon. The handle is held for
     // the process lifetime (Windows frees it on exit); we never signal it.
     let mutex_name = wide("Local\\NovaKeySingleInstanceMutex");
-    let _instance_mutex = match CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr())) {
-        Ok(h) => h,
-        Err(_) => return,
+
+    // `--finish-update` means we are the freshly-swapped-in exe relaunched by
+    // the updater; the exiting parent may still hold the mutex briefly, so
+    // retry for a few seconds instead of bailing immediately.
+    let finishing = std::env::args().any(|a| a == "--finish-update");
+
+    let _instance_mutex = {
+        let mut handle = None;
+        let attempts = if finishing { 25 } else { 1 };
+        for _ in 0..attempts {
+            match CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr())) {
+                Ok(h) => {
+                    if GetLastError() == ERROR_ALREADY_EXISTS {
+                        let _ = CloseHandle(h);
+                        if !finishing {
+                            // Normal launch, another instance is genuinely
+                            // running — exit instantly, no retry latency.
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        continue;
+                    }
+                    handle = Some(h);
+                    break;
+                }
+                Err(_) => return,
+            }
+        }
+        match handle {
+            Some(h) => h,
+            None => return, // another instance genuinely running
+        }
     };
-    if GetLastError() == ERROR_ALREADY_EXISTS {
-        // Another instance owns the mutex — exit quietly.
-        return;
+
+    if finishing {
+        updater::finish_pending_update();
     }
 
     // Load persisted settings and apply them.
@@ -144,6 +176,23 @@ unsafe fn run() {
 
     // Tray icon.
     tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc());
+
+    // Background update check: at most once every 24h, silent unless it applies.
+    {
+        let last = SETTINGS.with(|s| s.borrow().last_update_check);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if now.saturating_sub(last) > 86_400 {
+            SETTINGS.with(|s| {
+                let mut s = s.borrow_mut();
+                s.last_update_check = now;
+                s.save();
+            });
+            spawn_update_check(hwnd, /*background=*/ true);
+        }
+    }
 
     // Seed the browser flag from the currently-focused window.
     hook::set_is_browser(window_is_browser(GetForegroundWindow()));
@@ -283,6 +332,55 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
+/// Modal notification with NULL owner. Safe to call from a worker thread:
+/// MessageBoxW runs its own modal loop on the calling thread. Owning it to
+/// another thread's window can deadlock, so we intentionally pass no owner.
+fn notify(msg: &str, warn: bool) {
+    let text = wide(msg);
+    let cap = wide("NovaKey");
+    let icon = if warn { MB_ICONWARNING } else { MB_ICONINFORMATION };
+    unsafe {
+        MessageBoxW(HWND::default(), PCWSTR(text.as_ptr()), PCWSTR(cap.as_ptr()), MB_OK | icon);
+    }
+}
+
+/// Run the update check on a worker thread. `background` suppresses the
+/// "already up to date" and failure notifications.
+fn spawn_update_check(hwnd: HWND, background: bool) {
+    let hwnd_val = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        let outcome = updater::check_now();
+        match outcome {
+            updater::UpdateOutcome::Applied => {
+                // New instance is launching; tear this one down cleanly. Win32
+                // forbids destroying a window from a thread other than the one
+                // that created it (DestroyWindow would silently no-op here), so
+                // post WM_CLOSE instead — PostMessageW is documented safe across
+                // threads. The owning thread's wnd_proc has no WM_CLOSE arm, so
+                // it falls through to DefWindowProcW, which calls DestroyWindow
+                // on the owning (pump) thread, triggering the existing
+                // WM_DESTROY handler (tray::remove + PostQuitMessage).
+                unsafe {
+                    let _ = PostMessageW(
+                        HWND(hwnd_val as *mut _),
+                        WM_CLOSE,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            }
+            updater::UpdateOutcome::UpToDate if !background => {
+                notify("NovaKey is up to date.", false);
+            }
+            updater::UpdateOutcome::Failed(reason) if !background => {
+                notify(&format!("Update check failed: {reason}."), true);
+            }
+            // Background checks stay silent; manual up-to-date/failure handled above.
+            _ => {}
+        }
+    });
+}
+
 /// The shell's "TaskbarCreated" broadcast message id (0 if registration fails).
 fn taskbar_created_msg() -> u32 {
     thread_local! {
@@ -412,6 +510,7 @@ unsafe fn handle_command(hwnd: HWND, cmd: usize) {
             });
             hook::set_fix_autocomplete(new);
         }
+        tray::CMD_UPDATE => spawn_update_check(hwnd, /*background=*/ false),
         tray::CMD_QUIT => {
             let _ = DestroyWindow(hwnd);
         }

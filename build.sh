@@ -41,17 +41,45 @@ cp Resources/AppIcon.icns          "$RESOURCES/AppIcon.icns"
 cp Resources/AppLogo.png           "$RESOURCES/AppLogo.png"
 cp "$ENTITLEMENTS"                  "$RESOURCES/NovaKey.entitlements"
 
+# ── Embed Sparkle.framework ─────────────────────────────────────────────────
+FRAMEWORKS="$CONTENTS/Frameworks"
+mkdir -p "$FRAMEWORKS"
+SPARKLE_FW="$(find .build -type d -name 'Sparkle.framework' -path '*artifacts*' | head -1)"
+if [[ -z "$SPARKLE_FW" ]]; then
+  SPARKLE_FW="$(find .build -type d -name 'Sparkle.framework' | head -1)"
+fi
+if [[ -z "$SPARKLE_FW" ]]; then echo "✗ Sparkle.framework not found under .build" >&2; exit 1; fi
+cp -R "$SPARKLE_FW" "$FRAMEWORKS/Sparkle.framework"
+
 # ── Sign ──────────────────────────────────────────────────────────────────
 if [[ -n "${SIGN_IDENTITY:-}" ]]; then
     echo "▶ Signing (Developer ID): $SIGN_IDENTITY"
     SIGN_ARGS=(--force --sign "$SIGN_IDENTITY" --options runtime --timestamp
                --entitlements "$ENTITLEMENTS")
     # inside-out: nested code first, then the bundle. No --deep (Apple-discouraged).
+    # Sparkle's nested helpers/XPC first (inside-out), then its framework.
+    SPARKLE="$FRAMEWORKS/Sparkle.framework"
+    if [[ -d "$SPARKLE/Versions/B" ]]; then
+        find "$SPARKLE/Versions/B" \( -name '*.xpc' -o -name '*.app' -o -type f -perm +111 \) \
+            -print0 2>/dev/null | while IFS= read -r -d '' item; do
+            codesign "${SIGN_ARGS[@]}" "$item" || true
+        done
+    fi
+    codesign "${SIGN_ARGS[@]}" "$SPARKLE"
     codesign "${SIGN_ARGS[@]}" "$BIN"
     codesign "${SIGN_ARGS[@]}" "$APP"
     ADHOC=0
 else
     echo "▶ Signing (ad-hoc — local dev only, not distributable)..."
+    # Sparkle's nested helpers/XPC first (inside-out), then its framework.
+    SPARKLE="$FRAMEWORKS/Sparkle.framework"
+    if [[ -d "$SPARKLE/Versions/B" ]]; then
+        find "$SPARKLE/Versions/B" \( -name '*.xpc' -o -name '*.app' -o -type f -perm +111 \) \
+            -print0 2>/dev/null | while IFS= read -r -d '' item; do
+            codesign --force --sign - --entitlements "$ENTITLEMENTS" --options runtime "$item" || true
+        done
+    fi
+    codesign --force --sign - --entitlements "$ENTITLEMENTS" --options runtime "$SPARKLE"
     codesign --force --sign - --entitlements "$ENTITLEMENTS" --options runtime "$BIN"
     codesign --force --sign - --entitlements "$ENTITLEMENTS" --options runtime "$APP"
     ADHOC=1

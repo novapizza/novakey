@@ -74,6 +74,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController.onQuit = {
             NSApplication.shared.terminate(nil)
         }
+        statusBarController.onCheckForUpdates = {
+            UpdaterController.shared.checkForUpdates()
+        }
 
         // Track the frontmost app so the autocomplete guard is scoped to
         // browsers. Push the flag into the sender on every activation change.
@@ -114,6 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Enable launch at login
         enableLaunchAtLogin()
+        _ = UpdaterController.shared
 
         Log.info("NovaKey started successfully")
     }

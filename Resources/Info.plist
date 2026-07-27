@@ -22,6 +22,15 @@
     <string>0.2.6</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <!-- Sparkle auto-update keys. -->
+    <key>SUFeedURL</key>
+    <string>https://pub-7caaa511a0944e589f8c9a3382975fbd.r2.dev/latest/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>GvwA2ib22SwaKO/Eghp7J0EBf9qLNF1Zh6gZyksxUqo=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>
