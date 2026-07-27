@@ -35,6 +35,11 @@ mkdir -p "$MACOS" "$RESOURCES"
 cp .build/release/NovaKey "$BIN"
 chmod +x "$BIN"
 
+# Ensure dyld can find embedded Sparkle.framework at Contents/Frameworks.
+# Must run BEFORE codesign (rewriting load commands invalidates the signature).
+# Idempotent: add_rpath errors if already present, so ignore failure.
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$BIN" 2>/dev/null || true
+
 # All resources
 cp Resources/Info.plist            "$CONTENTS/Info.plist"
 cp Resources/AppIcon.icns          "$RESOURCES/AppIcon.icns"
