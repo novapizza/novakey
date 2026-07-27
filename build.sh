@@ -46,6 +46,18 @@ cp Resources/AppIcon.icns          "$RESOURCES/AppIcon.icns"
 cp Resources/AppLogo.png           "$RESOURCES/AppLogo.png"
 cp "$ENTITLEMENTS"                  "$RESOURCES/NovaKey.entitlements"
 
+# Sparkle compares CFBundleVersion (sparkle:version in the appcast), not
+# CFBundleShortVersionString, so it must strictly increase per release or the
+# updater reports "you're up to date". Derive it: 0.2.7 -> 207, 1.3.12 -> 10312.
+MARKETING_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$CONTENTS/Info.plist")"
+if [[ ! "$MARKETING_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "✗ CFBundleShortVersionString must be MAJOR.MINOR.PATCH, got '$MARKETING_VERSION'." >&2
+  exit 1
+fi
+IFS=. read -r V_MAJOR V_MINOR V_PATCH <<< "$MARKETING_VERSION"
+BUILD_NUMBER=$(( 10#$V_MAJOR * 10000 + 10#$V_MINOR * 100 + 10#$V_PATCH ))
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$CONTENTS/Info.plist"
+
 # ── Embed Sparkle.framework ─────────────────────────────────────────────────
 FRAMEWORKS="$CONTENTS/Frameworks"
 mkdir -p "$FRAMEWORKS"
@@ -127,5 +139,5 @@ if [[ "${NOTARIZE:-0}" == "1" ]]; then
 fi
 
 echo "  Bundle ID: $(defaults read "$(pwd)/$CONTENTS/Info" CFBundleIdentifier)"
-echo "  Version:   $(defaults read "$(pwd)/$CONTENTS/Info" CFBundleShortVersionString)"
+echo "  Version:   $(defaults read "$(pwd)/$CONTENTS/Info" CFBundleShortVersionString) (build $(defaults read "$(pwd)/$CONTENTS/Info" CFBundleVersion))"
 echo "✓ Done: $APP"
