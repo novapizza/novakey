@@ -22,9 +22,9 @@
     <string>0.2.5</string>
     <key>CFBundleVersion</key>
     <string>1</string>
-    <!-- Sparkle auto-update keys. SUFeedURL must still be filled before release. -->
+    <!-- Sparkle auto-update keys. -->
     <key>SUFeedURL</key>
-    <string>https://REPLACE_WITH_R2_PUBLIC_BASE/latest/appcast.xml</string>
+    <string>https://pub-7caaa511a0944e589f8c9a3382975fbd.r2.dev/latest/appcast.xml</string>
     <key>SUPublicEDKey</key>
     <string>GvwA2ib22SwaKO/Eghp7J0EBf9qLNF1Zh6gZyksxUqo=</string>
     <key>SUEnableAutomaticChecks</key>
