@@ -196,6 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         eventTapManager.keySender.stepByStepMode = settings.sendKeyStepByStep
         eventTapManager.toggleHotkeyKeyCode = settings.toggleHotkeyKeyCode
         eventTapManager.toggleHotkeyModifiers = CGEventFlags(rawValue: settings.toggleHotkeyModifiers)
+        eventTapManager.toggleHotkeyModifierOnly = settings.toggleHotkeyModifierOnly
         eventTapManager.switchWithFnKey = settings.switchWithFnKey
         engine.quickVietnamese = settings.quickVietnamese
         engine.deferredDiacritics = settings.deferredDiacritics

@@ -84,7 +84,18 @@ impl Settings {
                     read_u64(&text, "lastUpdateCheck").unwrap_or(s.last_update_check);
             }
         }
+        s.sanitize();
         s
+    }
+
+    /// Repair values a hand-edited or truncated settings file could contain.
+    /// A bogus hotkey would otherwise fail to register and leave the toggle
+    /// silently unbound, so fall back to the built-in default pair.
+    pub fn sanitize(&mut self) {
+        if !hotkey::is_valid(self.hotkey_mods, self.hotkey_vk) {
+            self.hotkey_mods = hotkey::DEFAULT_MODS;
+            self.hotkey_vk = hotkey::DEFAULT_VK;
+        }
     }
 
     pub fn save(&self) {
@@ -270,6 +281,33 @@ mod tests {
         );
         assert_eq!(read_u32(&json, "hotkeyMods"), Some(6));
         assert_eq!(read_u32(&json, "hotkeyVk"), Some(0x5A));
+    }
+
+    #[test]
+    fn sanitize_repairs_a_broken_hotkey() {
+        // vk 0 never registers; a bare key would be swallowed system-wide.
+        for (mods, vk) in [(0u32, 0u32), (0, 0x5A), (hotkey::MOD_SHIFT, 0x41), (0x4000, 0x41)] {
+            let mut s = Settings {
+                hotkey_mods: mods,
+                hotkey_vk: vk,
+                ..Settings::default()
+            };
+            s.sanitize();
+            assert_eq!(s.hotkey_mods, hotkey::DEFAULT_MODS);
+            assert_eq!(s.hotkey_vk, hotkey::DEFAULT_VK);
+        }
+    }
+
+    #[test]
+    fn sanitize_keeps_a_valid_hotkey() {
+        let mut s = Settings {
+            hotkey_mods: hotkey::MOD_CONTROL | hotkey::MOD_ALT,
+            hotkey_vk: 0x56, // V
+            ..Settings::default()
+        };
+        s.sanitize();
+        assert_eq!(s.hotkey_mods, hotkey::MOD_CONTROL | hotkey::MOD_ALT);
+        assert_eq!(s.hotkey_vk, 0x56);
     }
 
     #[test]
