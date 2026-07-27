@@ -13,8 +13,7 @@ use crate::settings;
 static UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Fixed manifest URL.
-// TODO(release): set R2 public host before shipping
-pub const FEED_URL: &str = "https://REPLACE_WITH_R2_PUBLIC_BASE/latest/latest.json";
+pub const FEED_URL: &str = "https://pub-7caaa511a0944e589f8c9a3382975fbd.r2.dev/latest/latest.json";
 
 /// This build's version, from Cargo. Never hardcode.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");

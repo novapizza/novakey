@@ -36,10 +36,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetMessageW, GetWindowThreadProcessId, PostMessageW, PostQuitMessage, RegisterClassW,
-    SetWindowsHookExW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, HMENU, HWND_MESSAGE, MB_OK,
-    MSG, WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
+    GetMessageW, GetWindowThreadProcessId, MessageBoxW, PostMessageW, PostQuitMessage,
+    RegisterClassW, SetWindowsHookExW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, HMENU,
+    HWND_MESSAGE, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MSG, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WINEVENT_OUTOFCONTEXT, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP,
+    WNDCLASSW,
 };
 
 const HOTKEY_ID: i32 = 1;
@@ -316,6 +317,18 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
+/// Modal notification with NULL owner. Safe to call from a worker thread:
+/// MessageBoxW runs its own modal loop on the calling thread. Owning it to
+/// another thread's window can deadlock, so we intentionally pass no owner.
+fn notify(msg: &str, warn: bool) {
+    let text = wide(msg);
+    let cap = wide("NovaKey");
+    let icon = if warn { MB_ICONWARNING } else { MB_ICONINFORMATION };
+    unsafe {
+        MessageBoxW(HWND::default(), PCWSTR(text.as_ptr()), PCWSTR(cap.as_ptr()), MB_OK | icon);
+    }
+}
+
 /// Run the update check on a worker thread. `background` suppresses the
 /// "already up to date" and failure notifications.
 fn spawn_update_check(hwnd: HWND, background: bool) {
@@ -342,10 +355,12 @@ fn spawn_update_check(hwnd: HWND, background: bool) {
                 }
             }
             updater::UpdateOutcome::UpToDate if !background => {
-                unsafe {
-                    let _ = MessageBeep(MB_OK);
-                }
+                notify("NovaKey is up to date.", false);
             }
+            updater::UpdateOutcome::Failed(reason) if !background => {
+                notify(&format!("Update check failed: {reason}."), true);
+            }
+            // Background checks stay silent; manual up-to-date/failure handled above.
             _ => {}
         }
     });
