@@ -19,6 +19,10 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("Cocoa"),
                 .linkedFramework("Carbon"),
+                // Sparkle is embedded at NovaKey.app/Contents/Frameworks by build.sh.
+                // SPM links it as @rpath/Sparkle.framework but adds no rpath for the
+                // app-bundle Frameworks dir, so dyld can't find it at runtime.
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
             ]
         ),
     ]
