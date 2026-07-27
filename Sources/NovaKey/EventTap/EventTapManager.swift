@@ -52,13 +52,37 @@ final class EventTapManager {
 
     /// Settings
     var toggleHotkeyKeyCode: UInt16 = KeyCode.z.rawValue
-    var toggleHotkeyModifiers: CGEventFlags = .maskAlternate  // Option+Z
+    var toggleHotkeyModifiers: CGEventFlags = .maskAlternate {  // Option+Z
+        didSet { updateComboWatcher() }
+    }
+
+    /// Whether the shortcut is modifier-only (⌃⇧ and friends): no main key, and
+    /// the toggle fires when the modifiers are released together.
+    var toggleHotkeyModifierOnly: Bool = false {
+        didSet { updateComboWatcher() }
+    }
+
+    /// State machine behind modifier-only shortcuts.
+    private var comboWatcher = HotkeyManager.ComboWatcher()
+
+    private func updateComboWatcher() {
+        // A single-modifier combination would fire on every Shift release, so
+        // only arm the watcher for a set the validator accepts.
+        let armed = toggleHotkeyModifierOnly
+            && !HotkeyManager.validateModifierOnly(toggleHotkeyModifiers).isReject
+        comboWatcher.setCombo(armed ? toggleHotkeyModifiers : [])
+    }
 
     /// Whether the Fn (Globe) key toggles Vietnamese/English mode.
     var switchWithFnKey: Bool = true
 
     /// Tracks Fn-key press state so we only toggle on the down edge.
     private var fnKeyWasDown = false
+
+    /// Set when a toggle-hotkey keyDown was swallowed, so its keyUp can be
+    /// swallowed too. Without this the focused app sees a release for a press it
+    /// never got, which confuses apps that track key state themselves.
+    private var suppressingHotkeyKeyUp = false
 
     init?(engine: TelexEngine) {
         guard let srcMgr = EventSourceManager() else {
@@ -184,6 +208,9 @@ final class EventTapManager {
     func reenable() {
         guard let tap = eventTap else { return }
         engine.resetSession()
+        // A keyUp we were waiting to swallow may have been dropped while the tap
+        // was off; clearing avoids eating an unrelated release later.
+        suppressingHotkeyKeyUp = false
         CGEvent.tapEnable(tap: tap, enable: true)
         Log.info("Event tap re-enabled after system timeout")
     }
@@ -318,6 +345,8 @@ final class EventTapManager {
         // Mouse clicks reset the session
         if type == .leftMouseDown || type == .rightMouseDown {
             engine.resetSession()
+            // ⌃-click and friends are modified clicks, not a pending toggle.
+            comboWatcher.keyPressed()
             return passThrough
         }
 
@@ -325,6 +354,14 @@ final class EventTapManager {
         // sync with the system language switch. We never suppress the event —
         // the system's own Globe behavior (if any) still runs.
         if type == .flagsChanged {
+            // Modifier-only shortcut (⌃⇧, …): fires on release, and only when
+            // no other key joined in. Checked in both language modes so it can
+            // turn Vietnamese back on.
+            if comboWatcher.flagsChanged(to: event.flags) {
+                Log.info("MODIFIER HOTKEY TOGGLE detected")
+                toggleMode()
+            }
+
             let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
             if keyCode == KeyCode.function.rawValue {
                 let fnDown = event.flags.contains(.maskSecondaryFn)
@@ -341,6 +378,16 @@ final class EventTapManager {
             return passThrough
         }
 
+        // Swallow the release that belongs to a swallowed hotkey keyDown.
+        if type == .keyUp {
+            if suppressingHotkeyKeyUp,
+               UInt16(event.getIntegerValueField(.keyboardEventKeycode)) == toggleHotkeyKeyCode {
+                suppressingHotkeyKeyUp = false
+                return nil
+            }
+            return passThrough
+        }
+
         // Only process key-down events for the engine
         guard type == .keyDown else {
             return passThrough
@@ -348,6 +395,10 @@ final class EventTapManager {
 
         keyDownCount += 1
         keyDownsSinceDiag += 1
+
+        // Any real keystroke means the modifiers being held are part of a
+        // shortcut, not a modifier-only toggle.
+        comboWatcher.keyPressed()
 
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
@@ -363,10 +414,22 @@ final class EventTapManager {
             return "keyDown: \(keyChar) (0x\(String(keyCode, radix: 16))) flags=[\(flagStr)] vi=\(engine.isVietnameseMode) buffer='\(engine.buffer.text)'"
         }())
 
+        // Any fresh press clears a pending keyUp suppression: if the release we
+        // were waiting for never arrived (app switch, tap timeout), the flag
+        // must not survive to eat an unrelated one later.
+        suppressingHotkeyKeyUp = false
+
         // Check for hotkey toggle (Option+Z by default)
-        if isToggleHotkey(keyCode: keyCode, flags: flags) {
-            Log.info("HOTKEY TOGGLE detected")
-            toggleMode()
+        if isToggleHotkey(event: event, keyCode: keyCode, flags: flags) {
+            // Auto-repeat while the combo is held would flip the mode dozens of
+            // times a second; act on the first press only, but keep swallowing
+            // the repeats so the key never leaks into the focused app.
+            let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+            if !isRepeat {
+                Log.info("HOTKEY TOGGLE detected")
+                toggleMode()
+            }
+            suppressingHotkeyKeyUp = true
             return nil // Suppress the hotkey event
         }
 
@@ -415,11 +478,19 @@ final class EventTapManager {
 
     // MARK: - Hotkey Detection
 
-    private func isToggleHotkey(keyCode: UInt16, flags: CGEventFlags) -> Bool {
+    /// Whether this keyDown is the configured toggle shortcut.
+    ///
+    /// Only ⌃⌥⇧⌘ take part in the comparison: CapsLock, Fn, and the numeric-pad
+    /// bit ride along on ordinary keystrokes, so folding them in would make the
+    /// shortcut fail depending on how the key was reached. Fn+⌥Z therefore also
+    /// matches an ⌥Z binding, which is deliberate — Fn has its own toggle.
+    private func isToggleHotkey(event: CGEvent, keyCode: UInt16, flags: CGEventFlags) -> Bool {
+        // Modifier-only shortcuts never match on a key press.
+        guard !toggleHotkeyModifierOnly else { return false }
         guard keyCode == toggleHotkeyKeyCode else { return false }
 
         // Check that the required modifier is pressed
-        let relevantFlags = flags.intersection([.maskShift, .maskControl, .maskAlternate, .maskCommand])
+        let relevantFlags = flags.intersection(HotkeyManager.recognizedModifiers)
         Log.debug("Hotkey check: relevantFlags=0x\(String(relevantFlags.rawValue, radix: 16)) expected=0x\(String(toggleHotkeyModifiers.rawValue, radix: 16))")
         return relevantFlags == toggleHotkeyModifiers
     }

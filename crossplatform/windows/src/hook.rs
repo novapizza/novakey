@@ -14,16 +14,26 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VK_CAPITAL, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_SYSKEYDOWN,
+    CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 use novakey_core::{EngineResult, TelexEngine};
 
+use crate::hotkey::ComboWatcher;
 use crate::sender::{self, NOVAKEY_MAGIC};
 use crate::vk;
 
 thread_local! {
     static ENGINE: RefCell<TelexEngine> = RefCell::new(TelexEngine::new());
+
+    /// Watches for a modifier-only toggle shortcut (e.g. Ctrl+Shift), which
+    /// `RegisterHotKey` cannot express. Same thread as the hook callback.
+    static COMBO: RefCell<ComboWatcher> = const { RefCell::new(ComboWatcher::new()) };
+}
+
+/// Arm the modifier-only toggle shortcut (0 disables it).
+pub fn set_mod_combo(mods: u32) {
+    COMBO.with(|c| c.borrow_mut().set_combo(mods));
 }
 
 /// Whether Vietnamese composition is active (toggled from the tray/hotkey).
@@ -106,7 +116,20 @@ pub unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: L
     }
 
     let msg = wparam.0 as u32;
-    if msg != WM_KEYDOWN && msg != WM_SYSKEYDOWN {
+    let vk_code = kb.vk_code_u32();
+
+    // Modifier-only toggle (Ctrl+Shift, …). Fed every key event, including
+    // releases, and checked before the enabled/keydown filters below so the
+    // shortcut still turns Vietnamese back *on*. The key is never suppressed —
+    // modifiers on their own do nothing in the focused app anyway.
+    let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+    if down || msg == WM_KEYUP || msg == WM_SYSKEYUP {
+        if COMBO.with(|c| c.borrow_mut().on_key(vk_code, down)) {
+            crate::post_toggle();
+        }
+    }
+
+    if !down {
         return CallNextHookEx(None, code, wparam, lparam);
     }
 
@@ -115,7 +138,6 @@ pub unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: L
         return CallNextHookEx(None, code, wparam, lparam);
     }
 
-    let vk_code = kb.vk_code_u32();
     let key = match vk::classify(vk_code) {
         Some(k) => k,
         None => return CallNextHookEx(None, code, wparam, lparam), // modifier/toggle

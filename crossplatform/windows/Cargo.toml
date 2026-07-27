@@ -1,6 +1,6 @@
 [package]
 name = "novakey-win"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 description = "NovaKey Windows app — low-level keyboard hook + SendInput Telex IME"
 license = "MIT"

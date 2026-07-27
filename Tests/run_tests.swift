@@ -1,7 +1,10 @@
 // NovaKey Test Runner
-// Compile: swiftc -o /tmp/novakey_tests Sources/NovaKey/Engine/*.swift Tests/run_tests.swift -framework Carbon
+// Compile: swiftc -o /tmp/novakey_tests Sources/NovaKey/Engine/*.swift \
+//              Sources/NovaKey/Settings/*.swift Sources/NovaKey/App/Constants.swift \
+//              Tests/run_tests.swift -framework Carbon
 // Run:     /tmp/novakey_tests
 
+import CoreGraphics
 import Foundation
 
 // ============================================================
@@ -1065,6 +1068,205 @@ test("deferred off: regressions") {
     try expect(typeDeferred("dend", deferred: false), "dend")
     try expect(typeDeferred("data", deferred: false), "data")
     try expect(typeDeferred("dongdo", deferred: false), "dongdo")
+}
+
+// ============================================================
+// Toggle-shortcut Tests
+// ============================================================
+print("\n--- Toggle shortcut Tests ---")
+
+test("hotkey: describes combinations in canonical order") {
+    try expect(
+        HotkeyManager.describe(keyCode: KeyCode.z.rawValue, modifiers: .maskAlternate),
+        "Option+Z"
+    )
+    try expect(
+        HotkeyManager.describe(
+            keyCode: KeyCode.space.rawValue,
+            modifiers: [.maskCommand, .maskShift, .maskControl, .maskAlternate]
+        ),
+        "Ctrl+Option+Shift+Cmd+Space"
+    )
+}
+
+test("hotkey: labels letters, punctuation and function keys") {
+    try expect(HotkeyManager.keyLabel(KeyCode.a.rawValue), "A")
+    try expect(HotkeyManager.keyLabel(KeyCode.slash.rawValue), "/")
+    try expect(HotkeyManager.keyLabel(0x7A), "F1")
+    try expect(HotkeyManager.keyLabel(0x6F), "F12")
+}
+
+test("hotkey: symbols render as chips") {
+    try expect(
+        HotkeyManager.symbols(keyCode: KeyCode.z.rawValue, modifiers: .maskAlternate),
+        ["⌥", "Z"]
+    )
+}
+
+test("hotkey: rejects modifier-less ordinary keys") {
+    // Bare keys would be swallowed by the tap in every application.
+    try expectTrue(HotkeyManager.validate(keyCode: KeyCode.z.rawValue, modifiers: []).isReject)
+    try expectTrue(HotkeyManager.validate(keyCode: KeyCode.space.rawValue, modifiers: []).isReject)
+}
+
+test("hotkey: allows modifier-less function keys") {
+    try expect(HotkeyManager.validate(keyCode: 0x7A, modifiers: []), .ok)  // F1
+}
+
+test("hotkey: rejects Shift-only combinations") {
+    try expectTrue(HotkeyManager.validate(keyCode: KeyCode.a.rawValue, modifiers: .maskShift).isReject)
+    try expect(
+        HotkeyManager.validate(keyCode: KeyCode.a.rawValue, modifiers: [.maskShift, .maskControl]),
+        .ok
+    )
+}
+
+test("hotkey: warns on system shortcuts but allows them") {
+    let verdict = HotkeyManager.validate(keyCode: KeyCode.q.rawValue, modifiers: .maskCommand)
+    try expectFalse(verdict.isReject)
+    try expectFalse(verdict.message == nil)
+}
+
+test("hotkey: default binding is valid") {
+    try expect(
+        HotkeyManager.validate(
+            keyCode: HotkeyManager.defaultKeyCode,
+            modifiers: HotkeyManager.defaultModifiers
+        ),
+        .ok
+    )
+}
+
+// MARK: Modifier-only shortcuts (⌃⇧ and friends)
+
+test("hotkey: accepts two-modifier combinations") {
+    try expect(HotkeyManager.validateModifierOnly([.maskControl, .maskShift]), .ok)
+    try expect(HotkeyManager.validateModifierOnly([.maskCommand, .maskAlternate]), .ok)
+}
+
+test("hotkey: rejects single-modifier combinations") {
+    // One modifier is held constantly while typing.
+    try expectTrue(HotkeyManager.validateModifierOnly(.maskShift).isReject)
+    try expectTrue(HotkeyManager.validateModifierOnly([]).isReject)
+}
+
+test("hotkey: describes modifier-only shortcuts by their modifiers") {
+    try expect(
+        HotkeyManager.describe(
+            keyCode: KeyCode.z.rawValue,
+            modifiers: [.maskControl, .maskShift],
+            modifierOnly: true
+        ),
+        "Ctrl+Shift"
+    )
+    try expect(
+        HotkeyManager.symbols(
+            keyCode: KeyCode.z.rawValue,
+            modifiers: [.maskControl, .maskShift],
+            modifierOnly: true
+        ),
+        ["⌃", "⇧"]
+    )
+}
+
+test("hotkey: watcher fires once on release") {
+    var w = HotkeyManager.ComboWatcher()
+    w.setCombo([.maskControl, .maskShift])
+    try expectFalse(w.flagsChanged(to: .maskControl))
+    try expectFalse(w.flagsChanged(to: [.maskControl, .maskShift]))
+    try expectTrue(w.flagsChanged(to: .maskControl))
+    try expectFalse(w.flagsChanged(to: []))
+}
+
+test("hotkey: watcher ignores combinations used as a shortcut") {
+    // ⌃⇧S must stay a normal shortcut for the focused app.
+    var w = HotkeyManager.ComboWatcher()
+    w.setCombo([.maskControl, .maskShift])
+    _ = w.flagsChanged(to: .maskControl)
+    _ = w.flagsChanged(to: [.maskControl, .maskShift])
+    w.keyPressed()
+    try expectFalse(w.flagsChanged(to: .maskControl))
+    try expectFalse(w.flagsChanged(to: []))
+}
+
+test("hotkey: watcher ignores partial and extra modifiers") {
+    var w = HotkeyManager.ComboWatcher()
+    w.setCombo([.maskControl, .maskShift])
+    // Control alone.
+    _ = w.flagsChanged(to: .maskControl)
+    try expectFalse(w.flagsChanged(to: []))
+    // A superset is not the combination.
+    _ = w.flagsChanged(to: .maskControl)
+    _ = w.flagsChanged(to: [.maskControl, .maskAlternate])
+    _ = w.flagsChanged(to: [.maskControl, .maskAlternate, .maskShift])
+    try expectFalse(w.flagsChanged(to: [.maskControl, .maskAlternate]))
+    try expectFalse(w.flagsChanged(to: .maskControl))
+    try expectFalse(w.flagsChanged(to: []))
+}
+
+test("hotkey: watcher re-arms between presses") {
+    var w = HotkeyManager.ComboWatcher()
+    w.setCombo([.maskControl, .maskShift])
+    for _ in 0..<2 {
+        _ = w.flagsChanged(to: .maskControl)
+        _ = w.flagsChanged(to: [.maskControl, .maskShift])
+        try expectTrue(w.flagsChanged(to: .maskControl))
+        _ = w.flagsChanged(to: [])
+    }
+}
+
+test("hotkey: watcher is inert without a combination") {
+    var w = HotkeyManager.ComboWatcher()
+    _ = w.flagsChanged(to: .maskControl)
+    _ = w.flagsChanged(to: [.maskControl, .maskShift])
+    try expectFalse(w.flagsChanged(to: .maskControl))
+    try expectFalse(w.flagsChanged(to: []))
+}
+
+test("hotkey: keycode 0 (A) survives a round trip") {
+    // Regression: `A` is virtual keycode 0x00, which a zero-means-unset getter
+    // silently turned back into the default Z.
+    let settings = AppSettings.shared
+    let oldKey = settings.toggleHotkeyKeyCode
+    let oldMods = settings.toggleHotkeyModifiers
+    defer {
+        settings.toggleHotkeyKeyCode = oldKey
+        settings.toggleHotkeyModifiers = oldMods
+    }
+
+    settings.toggleHotkeyKeyCode = KeyCode.a.rawValue
+    settings.toggleHotkeyModifiers = CGEventFlags.maskAlternate.rawValue
+    try expect(settings.toggleHotkeyKeyCode, KeyCode.a.rawValue)
+    try expect(HotkeyManager.currentSymbols, ["⌥", "A"])
+}
+
+test("hotkey: modifier-less stored value falls back to the default") {
+    let settings = AppSettings.shared
+    let oldKey = settings.toggleHotkeyKeyCode
+    let oldMods = settings.toggleHotkeyModifiers
+    defer {
+        settings.toggleHotkeyKeyCode = oldKey
+        settings.toggleHotkeyModifiers = oldMods
+    }
+
+    settings.toggleHotkeyModifiers = 0
+    try expect(settings.toggleHotkeyModifiers, HotkeyManager.defaultModifiers.rawValue)
+}
+
+test("hotkey: reset restores the default binding") {
+    let settings = AppSettings.shared
+    let oldKey = settings.toggleHotkeyKeyCode
+    let oldMods = settings.toggleHotkeyModifiers
+    defer {
+        settings.toggleHotkeyKeyCode = oldKey
+        settings.toggleHotkeyModifiers = oldMods
+    }
+
+    settings.toggleHotkeyKeyCode = KeyCode.j.rawValue
+    settings.toggleHotkeyModifiers = CGEventFlags.maskCommand.rawValue
+    settings.resetToggleHotkey()
+    try expect(settings.toggleHotkeyKeyCode, HotkeyManager.defaultKeyCode)
+    try expect(settings.toggleHotkeyModifiers, HotkeyManager.defaultModifiers.rawValue)
 }
 
 } // end runAllTests()

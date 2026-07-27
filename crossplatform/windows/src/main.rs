@@ -56,6 +56,38 @@ thread_local! {
     /// Current settings; owned by the (single) message-pump thread.
     pub(crate) static SETTINGS: RefCell<settings::Settings> =
         RefCell::new(settings::Settings::default());
+
+    /// Whether the toggle hotkey is currently registered. `RegisterHotKey` is
+    /// first-come-first-served per session, so a combination another app already
+    /// owns leaves us unbound — surfaced in the tray tooltip and Settings rather
+    /// than failing silently.
+    static HOTKEY_BOUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// The message window, so the keyboard hook can ask for a toggle.
+    static MAIN_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether the toggle hotkey is live. Same thread as the message pump.
+pub(crate) fn hotkey_bound() -> bool {
+    HOTKEY_BOUND.with(|b| b.get())
+}
+
+/// Ask the pump to toggle the language. Called from the keyboard hook when a
+/// modifier-only shortcut completes; posted rather than handled inline so the
+/// hook returns immediately (a slow hook gets dropped by Windows).
+pub(crate) fn post_toggle() {
+    let hwnd = MAIN_HWND.with(|h| h.get());
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let _ = PostMessageW(
+            HWND(hwnd as *mut _),
+            WM_COMMAND,
+            WPARAM(tray::CMD_TOGGLE),
+            LPARAM(0),
+        );
+    }
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -151,6 +183,8 @@ unsafe fn run() {
     )
     .expect("CreateWindowExW failed");
 
+    MAIN_HWND.with(|h| h.set(hwnd.0 as isize));
+
     // Install the low-level keyboard and mouse hooks on this thread.
     let _kbd_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook::keyboard_proc), hinst, 0)
         .expect("SetWindowsHookExW(WH_KEYBOARD_LL) failed");
@@ -169,10 +203,23 @@ unsafe fn run() {
         WINEVENT_OUTOFCONTEXT,
     );
 
-    // Toggle hotkey: from settings (defaults to Ctrl+Space).
+    // Toggle hotkey: from settings (defaults to Ctrl+Space). If the saved
+    // combination is already owned by another app, fall back to the default
+    // pair; if that is taken too we start unbound, which the tray tooltip and
+    // the Settings window both spell out.
     let (hk_mods, hk_vk) =
         SETTINGS.with(|s| (s.borrow().hotkey_mods, s.borrow().hotkey_vk));
-    let _ = register_toggle_hotkey(hwnd, hk_mods, hk_vk);
+    if !register_toggle_hotkey(hwnd, hk_mods, hk_vk)
+        && (hk_mods, hk_vk) != (hotkey::DEFAULT_MODS, hotkey::DEFAULT_VK)
+        && register_toggle_hotkey(hwnd, hotkey::DEFAULT_MODS, hotkey::DEFAULT_VK)
+    {
+        SETTINGS.with(|s| {
+            let mut s = s.borrow_mut();
+            s.hotkey_mods = hotkey::DEFAULT_MODS;
+            s.hotkey_vk = hotkey::DEFAULT_VK;
+            s.save();
+        });
+    }
 
     // Tray icon.
     tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc());
@@ -411,31 +458,56 @@ unsafe fn do_toggle(hwnd: HWND) {
     ui::refresh();
 }
 
-/// Description of the currently-configured toggle hotkey (e.g. "Ctrl+Space").
+/// Description of the currently-configured toggle hotkey (e.g. "Ctrl+Space"),
+/// flagged when it could not be registered so the tooltip never advertises a
+/// shortcut that does nothing.
 fn current_hotkey_desc() -> String {
-    SETTINGS.with(|s| {
+    let desc = SETTINGS.with(|s| {
         let s = s.borrow();
         hotkey::describe(s.hotkey_mods, s.hotkey_vk)
-    })
+    });
+    if hotkey_bound() {
+        desc
+    } else {
+        format!("{desc} — unavailable")
+    }
 }
 
 /// Register (replacing any existing) the global toggle hotkey. Returns whether
 /// registration succeeded. MOD_NOREPEAT keeps a held combo from auto-firing.
 unsafe fn register_toggle_hotkey(hwnd: HWND, mods: u32, vk: u32) -> bool {
     let _ = UnregisterHotKey(hwnd, HOTKEY_ID);
-    RegisterHotKey(
+
+    // Modifier-only shortcuts (Ctrl+Shift, …) can't go through RegisterHotKey;
+    // the keyboard hook watches for them instead, and can't be refused.
+    if hotkey::is_modifier_only(mods, vk) {
+        hook::set_mod_combo(mods);
+        HOTKEY_BOUND.with(|b| b.set(true));
+        return true;
+    }
+    hook::set_mod_combo(0);
+
+    let ok = RegisterHotKey(
         hwnd,
         HOTKEY_ID,
         HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT.0),
         vk,
     )
-    .is_ok()
+    .is_ok();
+    HOTKEY_BOUND.with(|b| b.set(ok));
+    ok
 }
 
 /// Try to switch to a new toggle hotkey. On success it is persisted and the tray
 /// tooltip refreshed; on failure the previous hotkey is restored so the toggle
 /// never ends up unbound.
 unsafe fn set_toggle_hotkey(hwnd: HWND, mods: u32, vk: u32) -> bool {
+    // Second line of defence: the recorder validates too, but nothing else may
+    // reach RegisterHotKey with a combination that would swallow a bare key.
+    if !hotkey::is_valid(mods, vk) {
+        return false;
+    }
+
     let (old_mods, old_vk) =
         SETTINGS.with(|s| (s.borrow().hotkey_mods, s.borrow().hotkey_vk));
 
