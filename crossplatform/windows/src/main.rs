@@ -17,7 +17,7 @@ mod tray;
 mod ui;
 mod vk;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use windows::core::PWSTR;
 use windows::core::PCWSTR;
@@ -26,23 +26,42 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::System::Threading::{
-    CreateMutexW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    CreateMutexW, GetCurrentProcess, OpenProcess, ProcessPowerThrottling,
+    QueryFullProcessImageNameW, SetPriorityClass, SetProcessInformation,
+    ABOVE_NORMAL_PRIORITY_CLASS, PROCESS_NAME_WIN32, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+    PROCESS_POWER_THROTTLING_STATE, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
+    GetLastInputInfo, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, LASTINPUTINFO,
+    MOD_NOREPEAT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetMessageW, GetWindowThreadProcessId, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
-    SetWindowsHookExW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, HMENU, HWND_MESSAGE, MB_OK, MSG,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_COMMAND, WM_DESTROY, WM_DPICHANGED,
-    WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW,
+    GetMessageW, GetWindowThreadProcessId, KillTimer, PostQuitMessage, RegisterClassW,
+    RegisterWindowMessageW, SetProcessDPIAware, SetTimer, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND, HHOOK, HMENU, MB_OK, MSG, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_HOTKEY,
+    WM_LBUTTONUP, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 const HOTKEY_ID: i32 = 1;
+
+/// Retries adding the tray icon until the shell accepts it (sign-in race).
+const TIMER_TRAY_RETRY: usize = 1;
+const TRAY_RETRY_MS: u32 = 2_000;
+
+/// Periodically checks that the low-level hooks are still installed.
+const TIMER_HOOK_WATCHDOG: usize = 2;
+const HOOK_WATCHDOG_MS: u32 = 3_000;
+/// Input the hooks haven't seen for this long means Windows dropped them.
+const HOOK_STALE_MS: u32 = 1_500;
 
 /// App-defined message the Settings window sends to (re)register the toggle
 /// hotkey: `wparam` = MOD_* bitmask, `lparam` = virtual-key. Returns 1 on
@@ -53,6 +72,9 @@ thread_local! {
     /// Current settings; owned by the (single) message-pump thread.
     pub(crate) static SETTINGS: RefCell<settings::Settings> =
         RefCell::new(settings::Settings::default());
+
+    /// Installed low-level hooks, kept so the watchdog can reinstall them.
+    static HOOKS: Cell<(HHOOK, HHOOK)> = Cell::new((HHOOK::default(), HHOOK::default()));
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -64,6 +86,13 @@ fn main() {
 }
 
 unsafe fn run() {
+    // Per-monitor DPI awareness so the Settings window, menus and tray badge
+    // render crisply at 125%/150%/200% instead of being bitmap-stretched (blurry)
+    // by the system. Must happen before any window is created.
+    if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).is_err() {
+        let _ = SetProcessDPIAware();
+    }
+
     // Single-instance guard: a named mutex shared across all sessions of the
     // current user. If it already exists, another NovaKey is running, so bail
     // out before installing hooks or a second tray icon. The handle is held for
@@ -86,6 +115,24 @@ unsafe fn run() {
     hook::set_fix_autocomplete(loaded.fix_browser_autocomplete);
     hook::set_quick_vietnamese(loaded.quick_vietnamese);
     hook::set_deferred_diacritics(loaded.deferred_diacritics);
+    sync_autostart();
+
+    // Low-level hook callbacks must answer within LowLevelHooksTimeout or
+    // Windows silently unhooks them. Sign-in is when the machine is busiest, so
+    // keep the scheduler and EcoQoS (Efficiency mode) from starving us.
+    let process = GetCurrentProcess();
+    let _ = SetPriorityClass(process, ABOVE_NORMAL_PRIORITY_CLASS);
+    let throttling = PROCESS_POWER_THROTTLING_STATE {
+        Version: 1, // PROCESS_POWER_THROTTLING_CURRENT_VERSION
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    let _ = SetProcessInformation(
+        process,
+        ProcessPowerThrottling,
+        &throttling as *const _ as *const std::ffi::c_void,
+        std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+    );
 
     let hmodule = GetModuleHandleW(None).expect("GetModuleHandleW failed");
     let hinst = HINSTANCE(hmodule.0);
@@ -101,30 +148,33 @@ unsafe fn run() {
     };
     RegisterClassW(&wc);
 
-    // Message-only window (HWND_MESSAGE parent): no UI, just a message sink.
+    // Hidden top-level window: never shown, no taskbar button. Deliberately
+    // NOT a message-only (HWND_MESSAGE) window: those receive no broadcasts, so
+    // "TaskbarCreated" (re-add the tray icon after Explorer starts/restarts)
+    // and WM_SETTINGCHANGE/WM_THEMECHANGED would never arrive.
     let window_name = wide("NovaKey");
-    let hwnd = CreateWindowExW(
-        Default::default(),
+    let hwnd = match CreateWindowExW(
+        WS_EX_TOOLWINDOW,
         PCWSTR(class_name.as_ptr()),
         PCWSTR(window_name.as_ptr()),
-        Default::default(),
+        WS_POPUP,
         0,
         0,
         0,
         0,
-        HWND_MESSAGE,
+        HWND::default(),
         HMENU::default(),
         hinst,
         None,
-    )
-    .expect("CreateWindowExW failed");
+    ) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
 
-    // Install the low-level keyboard and mouse hooks on this thread.
-    let _kbd_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook::keyboard_proc), hinst, 0)
-        .expect("SetWindowsHookExW(WH_KEYBOARD_LL) failed");
-
-    let _mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(hook::mouse_proc), hinst, 0)
-        .expect("SetWindowsHookExW(WH_MOUSE_LL) failed");
+    // Install the low-level keyboard and mouse hooks on this thread, and keep
+    // checking they stay installed.
+    install_hooks();
+    SetTimer(hwnd, TIMER_HOOK_WATCHDOG, HOOK_WATCHDOG_MS, None);
 
     // Reset the composition session whenever the foreground window changes.
     let _winevent = SetWinEventHook(
@@ -142,8 +192,11 @@ unsafe fn run() {
         SETTINGS.with(|s| (s.borrow().hotkey_mods, s.borrow().hotkey_vk));
     let _ = register_toggle_hotkey(hwnd, hk_mods, hk_vk);
 
-    // Tray icon.
-    tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc());
+    // Tray icon. At sign-in the notification area may not exist yet; keep
+    // retrying until it does (TaskbarCreated also covers this when it fires).
+    if !tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc()) {
+        SetTimer(hwnd, TIMER_TRAY_RETRY, TRAY_RETRY_MS, None);
+    }
 
     // Seed the browser flag from the currently-focused window.
     hook::set_is_browser(window_is_browser(GetForegroundWindow()));
@@ -154,6 +207,71 @@ unsafe fn run() {
         let _ = TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+}
+
+/// (Re)install the low-level keyboard and mouse hooks, replacing any previous
+/// ones. A failure is left for the watchdog to retry rather than aborting.
+unsafe fn install_hooks() {
+    let (old_kbd, old_mouse) = HOOKS.with(|h| h.get());
+    if !old_kbd.is_invalid() {
+        let _ = UnhookWindowsHookEx(old_kbd);
+    }
+    if !old_mouse.is_invalid() {
+        let _ = UnhookWindowsHookEx(old_mouse);
+    }
+    let hinst = GetModuleHandleW(None).map(|m| HINSTANCE(m.0)).unwrap_or_default();
+    let kbd = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook::keyboard_proc), hinst, 0)
+        .unwrap_or_default();
+    let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(hook::mouse_proc), hinst, 0)
+        .unwrap_or_default();
+    HOOKS.with(|h| h.set((kbd, mouse)));
+}
+
+/// Watchdog tick. Windows removes a low-level hook without notice when a
+/// callback overruns LowLevelHooksTimeout (common while the machine is busy
+/// right after sign-in), leaving NovaKey running but typing plain letters.
+/// There is no API to ask whether a hook is alive, so compare the system's
+/// last-input time with the last event our hooks saw: input they missed means
+/// they are gone, so install them again.
+unsafe fn check_hooks() {
+    let (kbd, mouse) = HOOKS.with(|h| h.get());
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    if !GetLastInputInfo(&mut info).as_bool() {
+        return;
+    }
+    // Wrapping tick arithmetic; a "negative" gap means the hook saw newer input.
+    let missed = info.dwTime.wrapping_sub(hook::last_hook_time());
+    let stale = missed > HOOK_STALE_MS && missed < u32::MAX / 2;
+    // Let fresh input settle first: the hook may simply not have run yet.
+    let settled = GetTickCount().wrapping_sub(info.dwTime) >= HOOK_STALE_MS;
+    if kbd.is_invalid() || mouse.is_invalid() || (stale && settled) {
+        install_hooks();
+        // Count the missed input as seen so an app our hooks cannot observe
+        // (an elevated window) does not trigger a reinstall on every tick.
+        hook::mark_hook_alive(info.dwTime);
+    }
+}
+
+/// Re-sync the HKCU Run entry with the setting at launch. If Windows disabled
+/// the entry (Task Manager > Startup apps), reflect that in the setting.
+/// Otherwise rewrite it so it points at this exe, which fixes a Run entry left
+/// pointing at an old or moved copy after an update.
+fn sync_autostart() {
+    SETTINGS.with(|s| {
+        let mut s = s.borrow_mut();
+        if !s.start_with_windows {
+            return;
+        }
+        if settings::autostart_disabled_by_windows() {
+            s.start_with_windows = false;
+            s.save();
+        } else {
+            settings::set_autostart(true);
+        }
+    });
 }
 
 /// Foreground-change callback — reset the session so we never compose across
@@ -244,6 +362,18 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        WM_TIMER => {
+            match wparam.0 {
+                TIMER_TRAY_RETRY => {
+                    if tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc()) {
+                        let _ = KillTimer(hwnd, TIMER_TRAY_RETRY);
+                    }
+                }
+                TIMER_HOOK_WATCHDOG => check_hooks(),
+                _ => {}
+            }
+            LRESULT(0)
+        }
         WM_HOTKEY => {
             if wparam.0 as i32 == HOTKEY_ID {
                 do_toggle(hwnd);
@@ -275,7 +405,9 @@ unsafe extern "system" fn wnd_proc(
         _ => {
             // Explorer restarted and dropped every tray icon: publish ours again.
             if msg != 0 && msg == taskbar_created_msg() {
-                tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc());
+                if tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc()) {
+                    let _ = KillTimer(hwnd, TIMER_TRAY_RETRY);
+                }
                 return LRESULT(0);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -393,6 +525,10 @@ unsafe fn handle_command(hwnd: HWND, cmd: usize) {
                 s.start_with_windows
             });
             settings::set_autostart(new);
+            if new {
+                // The user explicitly asked for it: undo a Task Manager disable.
+                settings::clear_startup_disabled();
+            }
         }
         tray::CMD_STEP => {
             let new = SETTINGS.with(|s| {

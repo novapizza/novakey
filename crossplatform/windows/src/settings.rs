@@ -136,13 +136,45 @@ fn read_u32(text: &str, key: &str) -> Option<u32> {
 
 // MARK: - Autostart (HKCU Run)
 
-/// Add or remove the current executable from the per-user Run key.
+/// Whether `path` lives in a temp folder — e.g. the exe was launched by
+/// double-clicking it inside the downloaded zip, which Explorer extracts to
+/// `%TEMP%\<guid>_NovaKey-windows.zip.xxx\`. Windows cleans those up, so a Run
+/// entry pointing there stops working after a while.
+fn is_temporary(path: &std::path::Path) -> bool {
+    let p = path.to_string_lossy().to_lowercase();
+    let temp = std::env::temp_dir().to_string_lossy().to_lowercase();
+    p.contains(r"\appdata\local\temp\") || (!temp.is_empty() && p.starts_with(&temp))
+}
+
+/// The exe the Run entry should launch: this one, or — when running from a
+/// temp folder — a copy installed at `%LOCALAPPDATA%\Programs\NovaKey`.
+fn autostart_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    if !is_temporary(&exe) {
+        return Some(exe);
+    }
+    let mut dest = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+    dest.push("Programs");
+    dest.push("NovaKey");
+    let _ = fs::create_dir_all(&dest);
+    dest.push("NovaKey.exe");
+    match fs::copy(&exe, &dest) {
+        Ok(_) => Some(dest),
+        // e.g. that copy is locked: keep pointing at it if it exists at all.
+        Err(_) if dest.exists() => Some(dest),
+        Err(_) => Some(exe),
+    }
+}
+
+/// Add or remove NovaKey from the per-user Run key.
 pub fn set_autostart(enable: bool) {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return,
+    let exe = match autostart_exe() {
+        Some(p) => p,
+        None => return,
     };
-    let exe_str = exe.to_string_lossy().to_string();
+    // Quoted: an unquoted path containing spaces (e.g. a user folder like
+    // "C:\Users\Nguyen Van A\...") is ambiguous and may fail to launch.
+    let exe_str = format!("\"{}\"", exe.to_string_lossy());
     unsafe {
         use windows_sys::Win32::System::Registry::{
             RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
@@ -181,6 +213,46 @@ pub fn set_autostart(enable: bool) {
     }
 }
 
+/// Where Task Manager / Settings > Startup apps records a per-user Run entry
+/// the user switched off. The Run value stays; Windows just skips it.
+const STARTUP_APPROVED_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+
+/// Whether Windows has our Run entry marked disabled (Startup apps). The value
+/// is REG_BINARY; an odd first byte (0x03) means disabled, 0x02 enabled.
+pub fn autostart_disabled_by_windows() -> bool {
+    unsafe {
+        use windows_sys::Win32::System::Registry::{
+            RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_BINARY,
+        };
+        let subkey = wide(STARTUP_APPROVED_KEY);
+        let value = wide(RUN_VALUE);
+        let mut data = [0u8; 12];
+        let mut len = data.len() as u32;
+        let rc = RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_BINARY,
+            std::ptr::null_mut(),
+            data.as_mut_ptr() as *mut _,
+            &mut len,
+        );
+        rc == 0 && len > 0 && data[0] & 1 == 1
+    }
+}
+
+/// Drop Windows' "disabled" mark on our Run entry; a missing value means
+/// enabled. Only called when the user turns "Start with Windows" on.
+pub fn clear_startup_disabled() {
+    unsafe {
+        use windows_sys::Win32::System::Registry::{RegDeleteKeyValueW, HKEY_CURRENT_USER};
+        let subkey = wide(STARTUP_APPROVED_KEY);
+        let value = wide(RUN_VALUE);
+        RegDeleteKeyValueW(HKEY_CURRENT_USER, subkey.as_ptr(), value.as_ptr());
+    }
+}
+
 /// UTF-16, NUL-terminated.
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -212,6 +284,18 @@ mod tests {
         );
         assert_eq!(read_bool(&json, "quickVietnamese"), Some(true));
         assert_eq!(read_bool(&json, "deferredDiacritics"), Some(true));
+    }
+
+    #[test]
+    fn detects_temp_locations() {
+        use std::path::Path;
+        assert!(is_temporary(Path::new(
+            r"C:\Users\An\AppData\Local\Temp\1a2b_NovaKey-windows.zip.565\NovaKey.exe"
+        )));
+        assert!(!is_temporary(Path::new(
+            r"C:\Users\An\AppData\Local\Programs\NovaKey\NovaKey.exe"
+        )));
+        assert!(!is_temporary(Path::new(r"C:\Tools\NovaKey.exe")));
     }
 
     #[test]

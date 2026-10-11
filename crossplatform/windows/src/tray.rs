@@ -116,14 +116,14 @@ fn set_tip(data: &mut NOTIFYICONDATAW, tip: &str) {
     }
 }
 
-/// Add the tray icon.
-pub fn add(hwnd: HWND, enabled: bool, hotkey: &str) {
+/// Add the tray icon. Returns false if the shell refused it — typically at
+/// sign-in, when NovaKey starts before the taskbar's notification area exists.
+pub fn add(hwnd: HWND, enabled: bool, hotkey: &str) -> bool {
     let (mut data, owned) = base_data(hwnd, enabled);
     set_tip(&mut data, &tip_for(enabled, hotkey));
-    unsafe {
-        let _ = Shell_NotifyIconW(NIM_ADD, &data);
-    }
+    let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &data).as_bool() };
     retire_previous_badge(owned);
+    ok
 }
 
 /// Update the tooltip and icon to reflect the current on/off state and hotkey.
