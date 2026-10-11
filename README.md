@@ -13,10 +13,13 @@ Fast, lightweight (228KB), compatible with browsers, terminals, and all macOS ap
 - **Smart tone placement** -- modern Vietnamese orthographic rules (e.g., `hoang` + `f` places tone on `a`, not `o`)
 - **English-word protection** -- Telex transforms are gated on structural syllable validity, so `class`, `know`, and `add` stay literal instead of turning into Vietnamese
 - **Double-press escape / n+1 typing** -- typing a Telex key twice trusts the second press unconditionally, so `disst` → `dist`, `noww` → `now`, `corrrection` → `correction`
+- **Quick Vietnamese (opt-in)** -- a lone `w` after an initial consonant becomes `ư` (e.g. `tw` → `tư`), with real-time revert so mixed English words like `huawei` stay literal
 - **Menu bar app** -- runs as a status bar icon (V/E), no dock icon
 - **Browser autocomplete fix** -- probes the focused field's selection to compensate for inline URL-bar suggestions, avoiding backspace miscounts
 - **Sleep/wake recovery** -- automatically restarts event tap after system sleep
-- **Option+Z** to toggle Vietnamese/English mode
+- **Customizable toggle hotkey** -- defaults to `Option+Z`; rebindable in Settings
+- **Fn (Globe) key switching** -- optionally follow the system language switch via the Fn/Globe key
+- **Launch at login** and an optional **switch sound**
 
 ## Requirements
 
@@ -39,79 +42,6 @@ swift build -c release
 
 This assembles the app bundle, copies all resources, and signs it. With no
 environment set it signs **ad-hoc** (local dev only — not distributable).
-
-**Release (Developer ID + notarization):**
-
-```bash
-# Sign with a real Developer ID Application identity
-SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build.sh
-
-# Sign + notarize + staple (pick one credential set)
-SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-  NOTARIZE=1 NOTARY_PROFILE=novakey ./build.sh
-```
-
-Notarization credentials (choose one):
-
-| Method | Env vars |
-|--------|----------|
-| Keychain profile | `NOTARY_PROFILE` (created via `xcrun notarytool store-credentials`) |
-| App Store Connect API key | `APPLE_API_KEY` (.p8 path), `APPLE_API_KEY_ID`, `APPLE_API_ISSUER` |
-| Apple ID | `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` (app-specific) |
-
-Signing is inside-out with hardened runtime (`--options runtime --timestamp`);
-the notary ticket is stapled into the bundle so it validates offline.
-
-### Package + sign (Windows)
-
-Windows artifacts are Authenticode-signed with **Azure Trusted Signing** via
-`signtool` — no certificate is stored locally.
-
-```powershell
-# Service-principal auth for the Trusted Signing account
-$env:AZURE_TENANT_ID='...'; $env:AZURE_CLIENT_ID='...'; $env:AZURE_CLIENT_SECRET='...'
-
-./scripts/sign-windows.ps1 -Path build/NovaKey.exe
-```
-
-Prerequisites: Windows SDK (`signtool.exe`), the Trusted Signing client
-(`dotnet tool install --global Microsoft.Trusted.Signing.Client`), and account
-details filled into [scripts/trusted-signing-metadata.json](scripts/trusted-signing-metadata.json).
-The script auto-locates `signtool` and the signing dlib, or honor `SIGNTOOL` /
-`TRUSTED_SIGNING_DLIB` env overrides.
-
-### Release (CI)
-
-Pushing a `v*.*.*` tag triggers [.github/workflows/release.yml](.github/workflows/release.yml),
-which builds, signs, and attaches macOS + Windows artifacts to a GitHub Release.
-
-Required repository secrets:
-
-| Platform | Secret | Purpose |
-|----------|--------|---------|
-| macOS | `CSC_LINK` | Developer ID Application cert (.p12), base64 |
-| macOS | `CSC_KEY_PASSWORD` | .p12 export password |
-| macOS | `APPLE_ID` | Apple ID for notarization |
-| macOS | `APPLE_APP_SPECIFIC_PASSWORD` | app-specific password for the Apple ID |
-| macOS | `APPLE_TEAM_ID` | Apple Developer team ID |
-| Windows | `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` | Trusted Signing service principal |
-| Windows | `AZURE_TRUSTED_SIGNING_ENDPOINT` | e.g. `https://eus.codesigning.azure.net/` |
-| Windows | `AZURE_CODE_SIGNING_ACCOUNT_NAME` | Trusted Signing account name |
-| Windows | `AZURE_CERT_PROFILE_NAME` | certificate profile name |
-| Windows | `AZURE_PUBLISHER_NAME` | MSIX manifest publisher CN (only if packaging `.msix`) |
-| R2 | `R2_RELEASES_ACCESS_KEY_ID` / `R2_RELEASES_SECRET_ACCESS_KEY` | R2 S3 API credentials |
-| R2 | `R2_RELEASES_ACCOUNT_ID` | Cloudflare account ID (S3 endpoint host) |
-| R2 | `R2_RELEASES_BUCKET` | target R2 bucket |
-
-The Developer ID signing identity is auto-detected from the imported `CSC_LINK`
-certificate — no separate identity secret is needed.
-
-Signed artifacts are also mirrored to Cloudflare R2 at
-`novakey/<tag>/` (immutable) and `novakey/latest/` (rolling) via the S3 API.
-
-The Windows job builds the Rust port in [crossplatform/](crossplatform/)
-(`cargo build -p novakey-win --release`), runs the engine parity suite, then
-signs the resulting `novakey.exe`. The macOS Swift app is unchanged.
 
 ### Run
 
@@ -149,11 +79,22 @@ The menu bar will show **V** (Vietnamese mode) or **E** (English mode).
 
 | Shortcut | Action |
 |----------|--------|
-| `Option+Z` | Toggle Vietnamese/English mode |
+| `Option+Z` | Toggle Vietnamese/English mode (default -- rebindable in Settings) |
 
 ### Settings
 
 Click the **V/E** icon in the menu bar > **Settings** to configure:
+
+**Input Method**
+- **Toggle hotkey** -- record your own shortcut for Vietnamese/English switching
+- **Quick Vietnamese** -- off by default; a lone `w` after a consonant becomes `ư` (e.g. `tw` → `tư`), while mixed words like `huawei` stay literal
+
+**General**
+- **Launch at login** -- start NovaKey automatically
+- **Play sound on switch** -- audible cue when toggling modes
+- **Switch with Fn (Globe) key** -- on by default; follow the system language switch
+
+**Compatibility**
 - **Fix browser autocomplete** -- on by default, helps with Chrome/Safari URL bars
 - **Send keys step-by-step** -- off by default, enable if you see garbled output in specific apps
 

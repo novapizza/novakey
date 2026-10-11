@@ -14,6 +14,7 @@ enum NovaTheme {
     static let textPrimary = Color.white
     static let textSecondary = Color.white.opacity(0.55)
     static let pillOffBG = Color.white.opacity(0.08)
+    static let danger = Color(red: 1.0, green: 0.42, blue: 0.42)
 
     static let brandGradient = LinearGradient(
         colors: [
@@ -33,6 +34,9 @@ struct SettingsView: View {
     @State private var playSound: Bool = AppSettings.shared.playSoundOnSwitch
     @State private var fixBrowserAutocomplete: Bool = AppSettings.shared.fixBrowserAutocomplete
     @State private var sendKeyStepByStep: Bool = AppSettings.shared.sendKeyStepByStep
+    @State private var switchWithFnKey: Bool = AppSettings.shared.switchWithFnKey
+    @State private var quickVietnamese: Bool = AppSettings.shared.quickVietnamese
+    @State private var deferredDiacritics: Bool = AppSettings.shared.deferredDiacritics
 
     /// Callback to toggle Vietnamese mode in the engine (wired from AppDelegate).
     var onToggleMode: ((Bool) -> Void)? = nil
@@ -74,7 +78,7 @@ struct SettingsView: View {
                 LanguagePill(label: "English", letter: "E", isActive: !isVietnamese)
                     .onTapGesture { setMode(false) }
                 Spacer()
-                HotkeyBadge()
+                HotkeyRecorder()
             }
             Divider().background(Color.white.opacity(0.06))
             HStack {
@@ -82,6 +86,40 @@ struct SettingsView: View {
                     .foregroundStyle(NovaTheme.textPrimary)
                 Spacer()
                 InputMethodMenu()
+            }
+            Divider().background(Color.white.opacity(0.06))
+            VStack(alignment: .leading, spacing: 4) {
+                row("Quick Vietnamese", trailing: {
+                    NovaToggle(isOn: $quickVietnamese)
+                        .onChange(of: quickVietnamese) { _, v in
+                            AppSettings.shared.quickVietnamese = v
+                            NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+                        }
+                })
+                Text("Type faster: a lone “w” after a consonant becomes “ư” (e.g. tw → tư). Mixed English words like “huawei” stay literal.")
+                    .font(.caption)
+                    .foregroundStyle(NovaTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // Sub-option of Quick Vietnamese: indented, and greyed out /
+                // disabled while Quick Vietnamese is off.
+                VStack(alignment: .leading, spacing: 4) {
+                    row("Deferred diacritics (Bỏ dấu sau)", trailing: {
+                        NovaToggle(isOn: $deferredDiacritics)
+                            .onChange(of: deferredDiacritics) { _, v in
+                                AppSettings.shared.deferredDiacritics = v
+                                NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+                            }
+                    })
+                    Text("Add marks after the word: “did” → “đi”, “thana” → “thân”. Some English words that look Vietnamese may transform; press the key again to escape.")
+                        .font(.caption)
+                        .foregroundStyle(NovaTheme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.leading, 16)
+                .padding(.top, 6)
+                .disabled(!quickVietnamese)
+                .opacity(quickVietnamese ? 1 : 0.4)
             }
         }
     }
@@ -103,6 +141,13 @@ struct SettingsView: View {
                 NovaToggle(isOn: $playSound)
                     .onChange(of: playSound) { _, v in
                         AppSettings.shared.playSoundOnSwitch = v
+                    }
+            })
+            row("Switch with Fn (Globe) key", trailing: {
+                NovaToggle(isOn: $switchWithFnKey)
+                    .onChange(of: switchWithFnKey) { _, v in
+                        AppSettings.shared.switchWithFnKey = v
+                        NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
                     }
             })
         }
@@ -234,24 +279,213 @@ struct GradientLetterBadge: View {
     }
 }
 
-// MARK: - Hotkey badge (Option+Z chip)
+// MARK: - Hotkey recorder (click to change the toggle shortcut)
 
-struct HotkeyBadge: View {
-    var body: some View {
-        HStack(spacing: 4) {
-            badgeKey("⌥")
-            badgeKey("Z")
-        }
+/// Shows the current toggle hotkey as key chips. Click to record a new one:
+/// press a modifier + key combination, or Escape to cancel.
+struct HotkeyRecorder: View {
+    @State private var symbols: [String] = HotkeyManager.currentSymbols
+    @State private var isRecording = false
+    @State private var monitor: Any?
+    /// Validation feedback for the last attempt: the message and whether it
+    /// blocked the change.
+    @State private var notice: (text: String, isError: Bool)?
+    /// Modifiers held during recording, so a release can be recognised.
+    @State private var heldModifiers: CGEventFlags = []
+
+    private var isDefault: Bool {
+        AppSettings.shared.toggleHotkeyKeyCode == HotkeyManager.defaultKeyCode
+            && AppSettings.shared.toggleHotkeyModifiers == HotkeyManager.defaultModifiers.rawValue
+            && !AppSettings.shared.toggleHotkeyModifierOnly
     }
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            HStack(spacing: 6) {
+                Button(action: toggleRecording) {
+                    Group {
+                        if isRecording {
+                            Text("Press keys…")
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .foregroundStyle(NovaTheme.sectionLabel)
+                                .padding(.horizontal, 10)
+                                .frame(height: 26)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .fill(Color.white.opacity(0.09))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                .stroke(NovaTheme.sectionLabel.opacity(0.7), lineWidth: 1)
+                                        )
+                                )
+                        } else {
+                            HStack(spacing: 4) {
+                                ForEach(Array(symbols.enumerated()), id: \.offset) { _, s in
+                                    badgeKey(s)
+                                }
+                            }
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("Click to change the language toggle shortcut")
+
+                // Only offered once the shortcut has moved off the default —
+                // the escape hatch from a combination that can't be pressed.
+                if !isDefault {
+                    Button(action: restoreDefault) {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(width: 26, height: 26)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(Color.white.opacity(0.09))
+                            )
+                            .foregroundStyle(NovaTheme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Restore the default shortcut (⌥Z)")
+                }
+            }
+
+            if let notice {
+                Text(notice.text)
+                    .font(.caption)
+                    .foregroundStyle(notice.isError ? NovaTheme.danger : NovaTheme.sectionLabel)
+                    .multilineTextAlignment(.trailing)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if isRecording {
+                Text("Press a combination, or just ⌃⇧. Esc to cancel.")
+                    .font(.caption)
+                    .foregroundStyle(NovaTheme.textSecondary)
+            }
+        }
+        .onDisappear(perform: stop)
+    }
+
     private func badgeKey(_ s: String) -> some View {
         Text(s)
             .font(.system(size: 12, weight: .semibold, design: .rounded))
-            .frame(width: 26, height: 26)
+            .frame(minWidth: 26, minHeight: 26)
+            .padding(.horizontal, s.count > 1 ? 6 : 0)
             .background(
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(Color.white.opacity(0.09))
             )
             .foregroundStyle(NovaTheme.textPrimary)
+    }
+
+    private func toggleRecording() {
+        isRecording ? stop() : start()
+    }
+
+    private func start() {
+        isRecording = true
+        notice = nil
+        heldModifiers = []
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
+            // Letting go of two or more modifiers with nothing else pressed
+            // records a modifier-only shortcut (⌃⇧ and friends).
+            if event.type == .flagsChanged {
+                return handleFlagsChanged(event)
+            }
+
+            // Escape cancels recording without changing the shortcut.
+            if event.keyCode == KeyCode.escape.rawValue {
+                stop()
+                return nil
+            }
+
+            let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            let cgFlags = Self.cgFlags(from: mods)
+
+            // Refuse combinations that would be unusable once global; stay in
+            // recording mode so the user can simply try another one.
+            switch HotkeyManager.validate(keyCode: event.keyCode, modifiers: cgFlags) {
+            case .reject(let why):
+                notice = (why, true)
+                return nil
+            case .warn(let why):
+                notice = (why, false)
+            case .ok:
+                notice = nil
+            }
+
+            AppSettings.shared.toggleHotkeyKeyCode = event.keyCode
+            AppSettings.shared.toggleHotkeyModifiers = cgFlags.rawValue
+            AppSettings.shared.toggleHotkeyModifierOnly = false
+            NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+
+            symbols = HotkeyManager.symbols(keyCode: event.keyCode, modifiers: cgFlags)
+            stop()
+            return nil  // swallow the event so it isn't typed anywhere
+        }
+    }
+
+    /// Track modifiers while recording; commit on the release edge.
+    private func handleFlagsChanged(_ event: NSEvent) -> NSEvent? {
+        let now = Self.cgFlags(
+            from: event.modifierFlags.intersection([.command, .option, .control, .shift])
+        )
+        let previous = heldModifiers
+        heldModifiers = now
+
+        // Only a release interests us — pressing more modifiers just builds up.
+        guard HotkeyManager.modifierCount(now) < HotkeyManager.modifierCount(previous) else {
+            return event
+        }
+        // One modifier on its own is held constantly while typing; wait for the
+        // user to add a second rather than rejecting outright.
+        guard HotkeyManager.modifierCount(previous) >= 2 else { return event }
+
+        switch HotkeyManager.validateModifierOnly(previous) {
+        case .reject(let why):
+            notice = (why, true)
+            return event
+        case .warn(let why):
+            notice = (why, false)
+        case .ok:
+            notice = nil
+        }
+
+        AppSettings.shared.toggleHotkeyModifiers = previous.rawValue
+        AppSettings.shared.toggleHotkeyModifierOnly = true
+        NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+
+        symbols = HotkeyManager.symbols(
+            keyCode: AppSettings.shared.toggleHotkeyKeyCode,
+            modifiers: previous,
+            modifierOnly: true
+        )
+        stop()
+        return event  // modifiers alone do nothing downstream; let them through
+    }
+
+    private func stop() {
+        isRecording = false
+        heldModifiers = []
+        if let m = monitor {
+            NSEvent.removeMonitor(m)
+            monitor = nil
+        }
+    }
+
+    private func restoreDefault() {
+        stop()
+        AppSettings.shared.resetToggleHotkey()
+        NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+        symbols = HotkeyManager.currentSymbols
+        notice = nil
+    }
+
+    /// Map AppKit modifier flags to Quartz CGEventFlags for persistence.
+    private static func cgFlags(from mods: NSEvent.ModifierFlags) -> CGEventFlags {
+        var flags: CGEventFlags = []
+        if mods.contains(.control) { flags.insert(.maskControl) }
+        if mods.contains(.option) { flags.insert(.maskAlternate) }
+        if mods.contains(.shift) { flags.insert(.maskShift) }
+        if mods.contains(.command) { flags.insert(.maskCommand) }
+        return flags
     }
 }
 

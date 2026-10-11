@@ -34,12 +34,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
-    GetSystemMetrics, IsWindow, LoadCursorW, MessageBoxW, RegisterClassW, SetForegroundWindow,
-    SetWindowPos, ShowWindow, HMENU, IDC_ARROW, MB_ICONWARNING, MB_OK, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_PAINT, WM_SYSKEYDOWN, WNDCLASSW, WS_CAPTION, WS_SYSMENU,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, IsWindow,
+    LoadCursorW, RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow, HMENU,
+    IDC_ARROW, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WM_CLOSE,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_PAINT, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CAPTION, WS_SYSMENU,
 };
 
 use crate::hotkey;
@@ -51,7 +50,7 @@ use crate::tray::{
 // MARK: - Layout constants (client pixels)
 
 const CLIENT_W: i32 = 460;
-const CLIENT_H: i32 = 770;
+const CLIENT_H: i32 = 786;
 const PAD: i32 = 18;
 const CARD_PAD: i32 = 16;
 const CARD_RADIUS: i32 = 14;
@@ -64,6 +63,7 @@ enum Region {
     PillVi,
     PillEn,
     HotkeyChange,
+    HotkeyReset,
     ToggleQuickVn,
     ToggleDeferred,
     ToggleAutostart,
@@ -72,13 +72,44 @@ enum Region {
     ToggleStep,
 }
 
+/// How a shortcut-row status line should read.
+#[derive(Clone, Copy, PartialEq)]
+enum NoticeKind {
+    /// Neutral guidance while recording.
+    Hint,
+    /// Bound, but the combination may be unreliable (Win chords).
+    Warn,
+    /// Nothing changed — the combination was refused.
+    Error,
+}
+
 struct UiState {
     hwnd: HWND,
     main_hwnd: HWND,
     /// True while waiting for the user to press a new toggle shortcut.
     capturing: bool,
+    /// Status line drawn under the toggle-shortcut row.
+    notice: Option<(String, NoticeKind)>,
     /// Clickable rectangles recorded during the last paint.
     hits: Vec<(Region, RECT)>,
+}
+
+/// Replace the shortcut-row status line.
+fn set_notice(msg: Option<(String, NoticeKind)>) {
+    UI.with(|u| {
+        if let Some(s) = u.borrow_mut().as_mut() {
+            s.notice = msg;
+        }
+    });
+}
+
+/// Enter or leave shortcut-capture mode.
+fn set_capturing(on: bool) {
+    UI.with(|u| {
+        if let Some(s) = u.borrow_mut().as_mut() {
+            s.capturing = on;
+        }
+    });
 }
 
 thread_local! {
@@ -154,6 +185,7 @@ pub unsafe fn open(main_hwnd: HWND) {
             hwnd,
             main_hwnd,
             capturing: false,
+            notice: None,
             hits: Vec::new(),
         });
     });
@@ -235,6 +267,25 @@ unsafe extern "system" fn wnd_proc(
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        // Releasing the modifiers with no other key pressed records a
+        // modifier-only shortcut such as Ctrl+Shift.
+        WM_KEYUP | WM_SYSKEYUP => {
+            if on_key_up(hwnd, wparam.0 as u32) {
+                return LRESULT(0);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        // Losing focus mid-capture would otherwise leave the recorder armed, so
+        // a keypress after switching back would be read as the new shortcut.
+        WM_KILLFOCUS => {
+            let capturing = UI.with(|u| u.borrow().as_ref().map(|s| s.capturing).unwrap_or(false));
+            if capturing {
+                set_capturing(false);
+                set_notice(None);
+                let _ = InvalidateRect(hwnd, None, false);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_CLOSE => {
             let _ = DestroyWindow(hwnd);
             LRESULT(0)
@@ -268,10 +319,19 @@ unsafe fn on_click(hwnd: HWND, x: i32, y: i32) {
 
     match region {
         Region::HotkeyChange => {
-            UI.with(|u| {
-                if let Some(s) = u.borrow_mut().as_mut() {
-                    s.capturing = true;
-                }
+            set_capturing(true);
+            set_notice(None);
+        }
+        Region::HotkeyReset => {
+            set_capturing(false);
+            let ok = apply_hotkey(main_hwnd, hotkey::DEFAULT_MODS, hotkey::DEFAULT_VK);
+            set_notice(if ok {
+                None
+            } else {
+                Some((
+                    "Another app is holding the default shortcut.".to_string(),
+                    NoticeKind::Error,
+                ))
             });
         }
         Region::PillVi => {
@@ -315,53 +375,103 @@ unsafe fn on_key(hwnd: HWND, vk: u32) -> bool {
     }
 
     // Wait for a non-modifier key; ignore modifiers pressed on their own.
-    if is_modifier(vk) {
+    if hotkey::is_modifier_vk(vk) {
         return true;
     }
 
     // Escape cancels capture without changing anything.
     if vk == 0x1B {
-        UI.with(|u| {
-            if let Some(s) = u.borrow_mut().as_mut() {
-                s.capturing = false;
-            }
-        });
+        set_capturing(false);
+        set_notice(None);
         let _ = InvalidateRect(hwnd, None, false);
         return true;
     }
 
     let mods = current_mods();
-    let main_hwnd = UI.with(|u| u.borrow().as_ref().map(|s| s.main_hwnd).unwrap_or_default());
-    UI.with(|u| {
-        if let Some(s) = u.borrow_mut().as_mut() {
-            s.capturing = false;
-        }
-    });
 
-    // Ask the main window to (re)register the global hotkey; 0 == failure.
-    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
-    let ok = SendMessageW(
-        main_hwnd,
-        crate::WM_APP_SETHOTKEY,
-        WPARAM(mods as usize),
-        LPARAM(vk as isize),
-    );
-    if ok.0 == 0 {
-        let text = wide("That shortcut is unavailable. Please try a different combination.");
-        let cap = wide("NovaKey");
-        MessageBoxW(
-            hwnd,
-            PCWSTR(text.as_ptr()),
-            PCWSTR(cap.as_ptr()),
-            MB_OK | MB_ICONWARNING,
-        );
+    // Refuse combinations that would misbehave once they are global — above all
+    // a modifier-less key, which RegisterHotKey would accept and then swallow in
+    // every application. Stay in capture mode so the user can simply try again.
+    let warning = match hotkey::validate(mods, vk) {
+        hotkey::Validity::Reject(why) => {
+            set_notice(Some((why.to_string(), NoticeKind::Error)));
+            let _ = InvalidateRect(hwnd, None, false);
+            return true;
+        }
+        hotkey::Validity::Warn(why) => Some(why),
+        hotkey::Validity::Ok => None,
+    };
+
+    let main_hwnd = UI.with(|u| u.borrow().as_ref().map(|s| s.main_hwnd).unwrap_or_default());
+    set_capturing(false);
+
+    if apply_hotkey(main_hwnd, mods, vk) {
+        set_notice(warning.map(|w| (w.to_string(), NoticeKind::Warn)));
+    } else {
+        set_notice(Some((
+            "That shortcut is already in use by another app. Try a different one.".to_string(),
+            NoticeKind::Error,
+        )));
     }
     let _ = InvalidateRect(hwnd, None, false);
     true
 }
 
-fn is_modifier(vk: u32) -> bool {
-    matches!(vk, 0x10 | 0x11 | 0x12 | 0x14 | 0x5B | 0x5C | 0xA0..=0xA5)
+/// Handle a key release. Returns true if it was consumed (during capture).
+///
+/// Letting go of two or more modifiers without having pressed anything else
+/// records a modifier-only shortcut — the Ctrl+Shift style most Vietnamese IMEs
+/// use. A single modifier is ignored so the user can reach for the second one.
+unsafe fn on_key_up(hwnd: HWND, vk: u32) -> bool {
+    let capturing = UI.with(|u| u.borrow().as_ref().map(|s| s.capturing).unwrap_or(false));
+    if !capturing {
+        return false;
+    }
+
+    let Some(bit) = hotkey::mod_bit(vk) else { return false };
+
+    // The key being released is already up as far as GetKeyState is concerned.
+    let mods = current_mods() | bit;
+    if mods.count_ones() < 2 {
+        return true;
+    }
+
+    let warning = match hotkey::validate(mods, hotkey::VK_NONE) {
+        hotkey::Validity::Reject(why) => {
+            set_notice(Some((why.to_string(), NoticeKind::Error)));
+            let _ = InvalidateRect(hwnd, None, false);
+            return true;
+        }
+        hotkey::Validity::Warn(why) => Some(why),
+        hotkey::Validity::Ok => None,
+    };
+
+    let main_hwnd = UI.with(|u| u.borrow().as_ref().map(|s| s.main_hwnd).unwrap_or_default());
+    set_capturing(false);
+
+    if apply_hotkey(main_hwnd, mods, hotkey::VK_NONE) {
+        set_notice(warning.map(|w| (w.to_string(), NoticeKind::Warn)));
+    } else {
+        set_notice(Some((
+            "That shortcut could not be set. Try a different one.".to_string(),
+            NoticeKind::Error,
+        )));
+    }
+    let _ = InvalidateRect(hwnd, None, false);
+    true
+}
+
+/// Ask the main window to (re)register the global hotkey. Returns false when the
+/// combination could not be bound (the previous one stays live).
+unsafe fn apply_hotkey(main_hwnd: HWND, mods: u32, vk: u32) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+    SendMessageW(
+        main_hwnd,
+        crate::WM_APP_SETHOTKEY,
+        WPARAM(mods as usize),
+        LPARAM(vk as isize),
+    )
+    .0 != 0
 }
 
 /// Read the currently-held modifiers into a `RegisterHotKey` bitmask.
@@ -404,7 +514,13 @@ unsafe fn paint(hwnd: HWND) {
             s.hotkey_vk,
         )
     });
-    let capturing = UI.with(|u| u.borrow().as_ref().map(|s| s.capturing).unwrap_or(false));
+    let (capturing, notice) = UI.with(|u| {
+        let b = u.borrow();
+        match b.as_ref() {
+            Some(s) => (s.capturing, s.notice.clone()),
+            None => (false, None),
+        }
+    });
     let hotkey_text = hotkey::describe(mods, vk);
 
     let mut ps = PAINTSTRUCT::default();
@@ -447,8 +563,8 @@ unsafe fn paint(hwnd: HWND) {
 
     // ----- Card: INPUT METHOD -----
     {
-        let card = rect(PAD, y, cw - PAD, y + 324);
-        fill_round(mem, card, px(CARD_RADIUS), CARD_BG);
+        let card = lrect(PAD, y, cw - PAD, y + 340);
+        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
         let ix = card.left + CARD_PAD;
         let ir = card.right - CARD_PAD;
         let mut cy = card.top + CARD_PAD;
@@ -471,33 +587,71 @@ unsafe fn paint(hwnd: HWND) {
         fill_solid(mem, rect(ix, cy, ir, cy + 1), DIVIDER);
         cy += 14;
 
-        // Toggle-shortcut row: label · current value · [Change] button.
+        // Toggle-shortcut row: label · current value · [Reset] [Change].
         SelectObject(mem, f_row);
         draw_text(mem, "Toggle shortcut", rect(ix, cy, ix + 200, cy + 28), TEXT, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
         let btn_w = 92;
-        let btn = rect(ir - btn_w, cy, ir, cy + 28);
+        let btn = lrect(ir - btn_w, cy, ir, cy + 28);
+        let btn_px = scaled(btn);
         let btn_label = if capturing { "Press keys…" } else { "Change" };
-        fill_round(mem, btn, px(8), if capturing { SECTION } else { PILL_OFF });
+        fill_round(mem, btn_px, px(8), if capturing { SECTION } else { PILL_OFF });
         SelectObject(mem, f_value);
         draw_text(
             mem,
             btn_label,
-            btn,
+            btn_px,
             if capturing { WINDOW_BG } else { TEXT },
             DT_CENTER | DT_SINGLELINE | DT_VCENTER,
         );
-        hits.push((Region::HotkeyChange, btn));
+        hits.push((Region::HotkeyChange, btn_px));
 
-        // Current hotkey text, right-aligned before the button.
+        // Reset — the only way back from a combination that can't be pressed.
+        let reset = lrect(btn.left - 8 - 60, cy, btn.left - 8, cy + 28);
+        let reset_px = scaled(reset);
+        fill_round(mem, reset_px, px(8), PILL_OFF);
+        draw_text(mem, "Reset", reset_px, TEXT2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        hits.push((Region::HotkeyReset, reset_px));
+
+        // Current hotkey text, right-aligned before the buttons.
         draw_text(
             mem,
             &hotkey_text,
-            rect(ix + 130, cy, btn.left - 12, cy + 28),
+            rect(ix + 130, cy, reset.left - 12, cy + 28),
             TEXT2,
             DT_RIGHT | DT_SINGLELINE | DT_VCENTER,
         );
-        cy += 28 + 14;
+        cy += 28 + 2;
+
+        // Status line: validation feedback, capture hint, or a standing warning
+        // that the shortcut never registered.
+        let status = match (&notice, capturing, crate::hotkey_bound()) {
+            (Some((text, kind)), _, _) => Some((text.clone(), *kind)),
+            (None, true, _) => Some((
+                "Press a combination, or just Ctrl+Shift. Esc to cancel.".to_string(),
+                NoticeKind::Hint,
+            )),
+            (None, false, false) => Some((
+                "Not registered — another app owns this combination.".to_string(),
+                NoticeKind::Error,
+            )),
+            (None, false, true) => None,
+        };
+        if let Some((text, kind)) = status {
+            SelectObject(mem, f_small);
+            draw_text(
+                mem,
+                &text,
+                rect(ix, cy, ir, cy + 16),
+                match kind {
+                    NoticeKind::Hint => TEXT2,
+                    NoticeKind::Warn => SECTION,
+                    NoticeKind::Error => DANGER,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+            );
+        }
+        cy += 16 + 12;
 
         // Input method (Telex only, for now).
         SelectObject(mem, f_row);
@@ -552,8 +706,8 @@ unsafe fn paint(hwnd: HWND) {
 
     // ----- Card: GENERAL -----
     {
-        let card = rect(PAD, y, cw - PAD, y + 128);
-        fill_round(mem, card, px(CARD_RADIUS), CARD_BG);
+        let card = lrect(PAD, y, cw - PAD, y + 128);
+        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
         let ix = card.left + CARD_PAD;
         let ir = card.right - CARD_PAD;
         let mut cy = card.top + CARD_PAD;
@@ -574,8 +728,8 @@ unsafe fn paint(hwnd: HWND) {
 
     // ----- Card: COMPATIBILITY -----
     {
-        let card = rect(PAD, y, cw - PAD, y + 128);
-        fill_round(mem, card, px(CARD_RADIUS), CARD_BG);
+        let card = lrect(PAD, y, cw - PAD, y + 128);
+        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
         let ix = card.left + CARD_PAD;
         let ir = card.right - CARD_PAD;
         let mut cy = card.top + CARD_PAD;
@@ -596,8 +750,8 @@ unsafe fn paint(hwnd: HWND) {
 
     // ----- Card: ABOUT -----
     {
-        let card = rect(PAD, y, cw - PAD, y + 84);
-        fill_round(mem, card, px(CARD_RADIUS), CARD_BG);
+        let card = lrect(PAD, y, cw - PAD, y + 84);
+        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
         let ix = card.left + CARD_PAD;
         let ir = card.right - CARD_PAD;
         let mut cy = card.top + CARD_PAD;
@@ -651,6 +805,7 @@ const CARD_BG: COLORREF = rgb(41, 41, 46);
 const SECTION: COLORREF = rgb(255, 184, 69);
 const TEXT: COLORREF = rgb(255, 255, 255);
 const TEXT2: COLORREF = rgb(150, 150, 156);
+const DANGER: COLORREF = rgb(255, 107, 107);
 const PILL_OFF: COLORREF = rgb(48, 48, 54);
 const TOGGLE_OFF: COLORREF = rgb(66, 66, 72);
 const DIVIDER: COLORREF = rgb(52, 52, 58);
@@ -659,14 +814,29 @@ const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF((r as u32) | ((g as u32) << 8) | ((b as u32) << 16))
 }
 
+/// A RECT in 96-DPI layout units (for positioning; scale before drawing).
+fn lrect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+    RECT {
+        left,
+        top,
+        right,
+        bottom,
+    }
+}
+
+/// A layout-unit RECT converted to device pixels.
+fn scaled(r: RECT) -> RECT {
+    RECT {
+        left: px(r.left),
+        top: px(r.top),
+        right: px(r.right),
+        bottom: px(r.bottom),
+    }
+}
+
 /// A device-pixel RECT from 96-DPI layout coordinates.
 fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
-    RECT {
-        left: px(left),
-        top: px(top),
-        right: px(right),
-        bottom: px(bottom),
-    }
+    scaled(lrect(left, top, right, bottom))
 }
 
 unsafe fn font(height: i32, weight: i32) -> HFONT {

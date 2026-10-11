@@ -3,6 +3,7 @@
 // Handles lifecycle: create, enable, disable, destroy, sleep/wake recovery.
 
 import Cocoa
+import Carbon // IsSecureEventInputEnabled()
 
 /// Manages the CGEventTap lifecycle and integrates it with the run loop.
 final class EventTapManager {
@@ -10,7 +11,37 @@ final class EventTapManager {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var retainedSelf: Unmanaged<EventTapManager>?
-    private var isRunning = false
+    private(set) var isRunning = false
+
+    /// How often the watchdog polls the tap's enabled state.
+    private static let healthCheckInterval: TimeInterval = 2.0
+
+    /// Tap callbacks slower than this are logged — a slow callback is what makes
+    /// macOS disable the tap in the first place.
+    private static let slowCallbackThreshold: TimeInterval = 0.100
+
+    /// Watchdog timer; created only once `start()` succeeds, torn down in `stop()`.
+    private var healthTimer: Timer?
+
+    /// Diagnostics counters (see `logDiagnostics()`).
+    private(set) var timeoutNotificationCount = 0
+    private(set) var watchdogRecoveryCount = 0
+    private(set) var slowCallbackCount = 0
+
+    /// Dump state every ~30s (15 * 2s) so a user's log shows what the tap was
+    /// doing at the moment input died, without needing them to reproduce on cue.
+    private static let diagnosticsEveryNChecks = 15
+    private var healthChecksSinceDiag = 0
+
+    /// Key-downs the tap has actually received. `keyDownsSinceDiag` resets on
+    /// every diagnostics dump: if it stays 0 while the user is typing, events
+    /// aren't reaching the tap at all (secure input, or a wedged main thread) --
+    /// which no amount of re-enabling can fix.
+    private(set) var keyDownCount = 0
+    private var keyDownsSinceDiag = 0
+
+    /// Last observed secure-input state, so the watchdog can log transitions.
+    private var lastSecureInputState = false
 
     let sourceManager: EventSourceManager
     let engine: TelexEngine
@@ -21,7 +52,37 @@ final class EventTapManager {
 
     /// Settings
     var toggleHotkeyKeyCode: UInt16 = KeyCode.z.rawValue
-    var toggleHotkeyModifiers: CGEventFlags = .maskAlternate  // Option+Z
+    var toggleHotkeyModifiers: CGEventFlags = .maskAlternate {  // Option+Z
+        didSet { updateComboWatcher() }
+    }
+
+    /// Whether the shortcut is modifier-only (⌃⇧ and friends): no main key, and
+    /// the toggle fires when the modifiers are released together.
+    var toggleHotkeyModifierOnly: Bool = false {
+        didSet { updateComboWatcher() }
+    }
+
+    /// State machine behind modifier-only shortcuts.
+    private var comboWatcher = HotkeyManager.ComboWatcher()
+
+    private func updateComboWatcher() {
+        // A single-modifier combination would fire on every Shift release, so
+        // only arm the watcher for a set the validator accepts.
+        let armed = toggleHotkeyModifierOnly
+            && !HotkeyManager.validateModifierOnly(toggleHotkeyModifiers).isReject
+        comboWatcher.setCombo(armed ? toggleHotkeyModifiers : [])
+    }
+
+    /// Whether the Fn (Globe) key toggles Vietnamese/English mode.
+    var switchWithFnKey: Bool = true
+
+    /// Tracks Fn-key press state so we only toggle on the down edge.
+    private var fnKeyWasDown = false
+
+    /// Set when a toggle-hotkey keyDown was swallowed, so its keyUp can be
+    /// swallowed too. Without this the focused app sees a release for a press it
+    /// never got, which confuses apps that track key state themselves.
+    private var suppressingHotkeyKeyUp = false
 
     init?(engine: TelexEngine) {
         guard let srcMgr = EventSourceManager() else {
@@ -55,12 +116,11 @@ final class EventTapManager {
             (1 << CGEventType.leftMouseDown.rawValue) |
             (1 << CGEventType.rightMouseDown.rawValue)
 
-        // Bridge `self` to the C callback via userInfo pointer.
-        // Use passRetained to prevent use-after-free if manager is deallocated
-        // while the tap is active. Released in stop().
-        let retained = Unmanaged.passRetained(self)
-        self.retainedSelf = retained
-        let userInfo = retained.toOpaque()
+        // Bridge `self` to the C callback via userInfo pointer. The retain
+        // that keeps this pointer valid is only taken once the tap and run
+        // loop source are confirmed created (see below), so failed attempts
+        // don't leak a retain per retry.
+        let userInfo = Unmanaged.passUnretained(self).toOpaque()
 
         // Try cgSessionEventTap first
         var tap = CGEvent.tapCreate(
@@ -89,20 +149,24 @@ final class EventTapManager {
             return false
         }
 
-        self.eventTap = tap
-
         guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
             Log.error("Failed to create run loop source")
-            self.eventTap = nil
+            CFMachPortInvalidate(tap)
             return false
         }
 
+        // Everything created successfully -- now take the retain that keeps
+        // `self` alive while the tap is active. Released in stop().
+        self.retainedSelf = Unmanaged.passRetained(self)
+        self.eventTap = tap
         self.runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 
         isRunning = true
-        Log.info("Event tap STARTED (stateID: \(sourceManager.stateID))")
+        lastSecureInputState = IsSecureEventInputEnabled()
+        startHealthTimer()
+        Log.info("Event tap STARTED (stateID: \(sourceManager.stateID), secureInput: \(lastSecureInputState))")
         return true
     }
 
@@ -110,11 +174,18 @@ final class EventTapManager {
     func stop() {
         guard isRunning else { return }
 
+        healthTimer?.invalidate()
+        healthTimer = nil
+
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
         }
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
+            // Disabling alone leaves the mach port alive. `start()` creates a
+            // fresh tap, so without invalidating here every stop/start cycle
+            // (notably sleep/wake) would leak a port for the app's lifetime.
+            CFMachPortInvalidate(tap)
         }
 
         runLoopSource = nil
@@ -129,21 +200,139 @@ final class EventTapManager {
     }
 
     /// Re-enable the event tap if macOS disabled it due to timeout.
+    ///
+    /// Always resets the engine session first: while the tap was dead the user's
+    /// keystrokes reached the app without us seeing them, so the syllable buffer
+    /// no longer matches what's on screen. Replaying a replacement against a
+    /// stale buffer would backspace over the wrong characters.
     func reenable() {
         guard let tap = eventTap else { return }
+        engine.resetSession()
+        // A keyUp we were waiting to swallow may have been dropped while the tap
+        // was off; clearing avoids eating an unrelated release later.
+        suppressingHotkeyKeyUp = false
         CGEvent.tapEnable(tap: tap, enable: true)
         Log.info("Event tap re-enabled after system timeout")
     }
 
+    // MARK: - Watchdog
+
+    private func startHealthTimer() {
+        healthTimer?.invalidate()
+        let timer = Timer(timeInterval: Self.healthCheckInterval, repeats: true) { [weak self] _ in
+            self?.checkHealth()
+        }
+        // .common so the watchdog keeps firing during modal/tracking run loops
+        // (menu open, alert up) — the same modes the tap source is added in.
+        RunLoop.main.add(timer, forMode: .common)
+        healthTimer = timer
+    }
+
+    /// Poll the tap's enabled state and revive it if macOS disabled it.
+    ///
+    /// The reactive `.tapDisabledByTimeout` handling in `handleEvent` is the
+    /// fastest path, but it only runs if that notification is actually delivered
+    /// to our callback. If it's missed, nothing else re-enables the tap and
+    /// Vietnamese input stays dead until NovaKey is relaunched. This is the
+    /// backstop for that case.
+    func checkHealth() {
+        guard isRunning, let tap = eventTap else { return }
+
+        // Secure input can flip without the tap's state changing at all, so
+        // check it on every pass and log the edges. A transition to `true` that
+        // never comes back is the "typing died in Terminal" smoking gun.
+        let secureNow = IsSecureEventInputEnabled()
+        if secureNow != lastSecureInputState {
+            lastSecureInputState = secureNow
+            let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
+            Log.info("SECURE INPUT \(secureNow ? "ENABLED" : "disabled") (frontmost: \(frontmost)) -- while active, NO event tap receives key events")
+        }
+
+        guard !CGEvent.tapIsEnabled(tap: tap) else {
+            // Tap looks healthy -- but "healthy" is exactly what a secure-input
+            // or hung-main-thread failure also looks like, so dump state
+            // periodically regardless. `keysSeen` is the discriminator: zero
+            // while the user is typing means events aren't reaching us at all.
+            healthChecksSinceDiag += 1
+            if healthChecksSinceDiag >= Self.diagnosticsEveryNChecks {
+                healthChecksSinceDiag = 0
+                logDiagnostics(context: "periodic")
+            }
+            return
+        }
+
+        let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
+        let secureInput = IsSecureEventInputEnabled()
+        Log.error("WATCHDOG: tap found DISABLED (frontmost: \(frontmost), secureInput: \(secureInput)) -- reviving")
+
+        // Same stale-buffer reasoning as `reenable()`.
+        engine.resetSession()
+        CGEvent.tapEnable(tap: tap, enable: true)
+        watchdogRecoveryCount += 1
+
+        if CGEvent.tapIsEnabled(tap: tap) {
+            Log.info("WATCHDOG: tap re-enabled (recoveries: \(watchdogRecoveryCount))")
+        } else {
+            Log.error("WATCHDOG: tapEnable did NOT stick -- tap still disabled")
+        }
+    }
+
+    /// Dump the diagnostic counters plus the current secure-input state.
+    ///
+    /// Secure Keyboard Entry (Terminal.app/iTerm2, and any password field) blocks
+    /// key events from reaching *every* event tap while leaving the tap reporting
+    /// itself as enabled — so a healthy-looking tap that receives nothing is the
+    /// signature of that state, and this log line is our only visibility into it.
+    /// Note it belongs to whichever process turned it on: relaunching NovaKey
+    /// cannot clear it.
+    func logDiagnostics(context: String) {
+        let keysSeen = keyDownsSinceDiag
+        keyDownsSinceDiag = 0
+        Log.info("""
+            DIAG(\(context)): running=\(isRunning) \
+            enabled=\(eventTap.map { CGEvent.tapIsEnabled(tap: $0) }.map(String.init) ?? "no-tap") \
+            secureInput=\(IsSecureEventInputEnabled()) \
+            vi=\(engine.isVietnameseMode) \
+            frontmost=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?") \
+            keysSeen=\(keysSeen) keysTotal=\(keyDownCount) \
+            timeouts=\(timeoutNotificationCount) \
+            watchdogRecoveries=\(watchdogRecoveryCount) \
+            slowCallbacks=\(slowCallbackCount)
+            """)
+    }
+
     // MARK: - Event Processing
 
-    /// Called from the global C callback. Processes a single event.
-    /// Returns nil to suppress the event, or the (possibly modified) event to pass through.
+    /// Called from the global C callback. Times the real work so we can spot the
+    /// slow callbacks that get the tap disabled in the first place.
     func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        let started = CFAbsoluteTimeGetCurrent()
+        let result = processEvent(proxy: proxy, type: type, event: event)
+        let elapsed = CFAbsoluteTimeGetCurrent() - started
+
+        if elapsed > Self.slowCallbackThreshold {
+            slowCallbackCount += 1
+            let ms = Int(elapsed * 1000)
+            let count = slowCallbackCount
+            // Resolving the frontmost app is itself not free, and the file write
+            // is already deferred by Log — keep both off the hot path entirely.
+            DispatchQueue.main.async {
+                let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
+                Log.error("SLOW tap callback: \(ms)ms type=\(type.rawValue) frontmost=\(frontmost) (total: \(count))")
+            }
+        }
+        return result
+    }
+
+    /// Processes a single event.
+    /// Returns nil to suppress the event, or the (possibly modified) event to pass through.
+    private func processEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let passThrough = Unmanaged.passUnretained(event)
 
         // Handle tap disabled by system timeout
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            timeoutNotificationCount += 1
+            Log.error("Tap disabled by \(type == .tapDisabledByTimeout ? "timeout" : "user input") (count: \(timeoutNotificationCount))")
             reenable()
             return passThrough
         }
@@ -156,6 +345,46 @@ final class EventTapManager {
         // Mouse clicks reset the session
         if type == .leftMouseDown || type == .rightMouseDown {
             engine.resetSession()
+            // ⌃-click and friends are modified clicks, not a pending toggle.
+            comboWatcher.keyPressed()
+            return passThrough
+        }
+
+        // Fn (Globe) key: toggle mode on the down edge so NovaKey stays in
+        // sync with the system language switch. We never suppress the event —
+        // the system's own Globe behavior (if any) still runs.
+        if type == .flagsChanged {
+            // Modifier-only shortcut (⌃⇧, …): fires on release, and only when
+            // no other key joined in. Checked in both language modes so it can
+            // turn Vietnamese back on.
+            if comboWatcher.flagsChanged(to: event.flags) {
+                Log.info("MODIFIER HOTKEY TOGGLE detected")
+                toggleMode()
+            }
+
+            let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+            if keyCode == KeyCode.function.rawValue {
+                let fnDown = event.flags.contains(.maskSecondaryFn)
+                if fnDown && !fnKeyWasDown {
+                    fnKeyWasDown = true
+                    if switchWithFnKey {
+                        Log.info("Fn key language switch detected")
+                        toggleMode()
+                    }
+                } else if !fnDown {
+                    fnKeyWasDown = false
+                }
+            }
+            return passThrough
+        }
+
+        // Swallow the release that belongs to a swallowed hotkey keyDown.
+        if type == .keyUp {
+            if suppressingHotkeyKeyUp,
+               UInt16(event.getIntegerValueField(.keyboardEventKeycode)) == toggleHotkeyKeyCode {
+                suppressingHotkeyKeyUp = false
+                return nil
+            }
             return passThrough
         }
 
@@ -164,29 +393,51 @@ final class EventTapManager {
             return passThrough
         }
 
+        keyDownCount += 1
+        keyDownsSinceDiag += 1
+
+        // Any real keystroke means the modifiers being held are part of a
+        // shortcut, not a modifier-only toggle.
+        comboWatcher.keyPressed()
+
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
-        #if DEBUG
-        let keyChar = KeyCode(rawValue: keyCode)?.asciiLetter.map(String.init) ?? "?"
-        let flagStr = [
-            flags.contains(.maskShift) ? "Shift" : nil,
-            flags.contains(.maskControl) ? "Ctrl" : nil,
-            flags.contains(.maskAlternate) ? "Opt" : nil,
-            flags.contains(.maskCommand) ? "Cmd" : nil,
-        ].compactMap { $0 }.joined(separator: "+")
-        Log.debug("keyDown: \(keyChar) (0x\(String(keyCode, radix: 16))) flags=[\(flagStr)] vi=\(engine.isVietnameseMode)")
-        #endif
+        Log.verbose({
+            let keyChar = KeyCode(rawValue: keyCode)?.asciiLetter.map(String.init) ?? "?"
+            let flagStr = [
+                flags.contains(.maskShift) ? "Shift" : nil,
+                flags.contains(.maskAlphaShift) ? "Caps" : nil,
+                flags.contains(.maskControl) ? "Ctrl" : nil,
+                flags.contains(.maskAlternate) ? "Opt" : nil,
+                flags.contains(.maskCommand) ? "Cmd" : nil,
+            ].compactMap { $0 }.joined(separator: "+")
+            return "keyDown: \(keyChar) (0x\(String(keyCode, radix: 16))) flags=[\(flagStr)] vi=\(engine.isVietnameseMode) buffer='\(engine.buffer.text)'"
+        }())
+
+        // Any fresh press clears a pending keyUp suppression: if the release we
+        // were waiting for never arrived (app switch, tap timeout), the flag
+        // must not survive to eat an unrelated one later.
+        suppressingHotkeyKeyUp = false
 
         // Check for hotkey toggle (Option+Z by default)
-        if isToggleHotkey(keyCode: keyCode, flags: flags) {
-            Log.info("HOTKEY TOGGLE detected")
-            engine.isVietnameseMode.toggle()
-            engine.resetSession()
-            onModeChanged?(engine.isVietnameseMode)
+        if isToggleHotkey(event: event, keyCode: keyCode, flags: flags) {
+            // Auto-repeat while the combo is held would flip the mode dozens of
+            // times a second; act on the first press only, but keep swallowing
+            // the repeats so the key never leaks into the focused app.
+            let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+            if !isRepeat {
+                Log.info("HOTKEY TOGGLE detected")
+                toggleMode()
+            }
+            suppressingHotkeyKeyUp = true
             return nil // Suppress the hotkey event
         }
 
-        let isShift = flags.contains(.maskShift)
+        // Effective letter case = Shift XOR CapsLock. Without folding CapsLock
+        // (.maskAlphaShift) in, replaced text would be rebuilt lowercase while
+        // pass-through consonants stay uppercase -- e.g. "CHào" instead of
+        // "CHÀO" when composing with CapsLock on.
+        let isShift = flags.contains(.maskShift) != flags.contains(.maskAlphaShift)
         let hasCmd = flags.contains(.maskCommand)
         let hasCtrl = flags.contains(.maskControl)
         let hasOption = flags.contains(.maskAlternate)
@@ -203,26 +454,43 @@ final class EventTapManager {
             return passThrough
 
         case .replace(let bs, let text):
-            Log.debug("REPLACE: \(bs) backspaces + '\(text)'")
+            Log.verbose("REPLACE: \(bs) backspaces + '\(text)' (browser=\(keySender.browserKind), flicker=\(keySender.reduceFlicker))")
             keySender.execute(result: result, proxy: proxy)
             return nil
 
         case .restore(let bs, let text):
             // Invalid syllable at word-break: emit the raw-keystroke restore
             // synthetically, then let the original word-break key pass through.
-            Log.debug("RESTORE: \(bs) backspaces + '\(text)'")
+            Log.verbose("RESTORE: \(bs) backspaces + '\(text)'")
             keySender.execute(result: .replace(backspaces: bs, text: text), proxy: proxy)
             return passThrough
         }
     }
 
+    // MARK: - Mode Toggle
+
+    /// Flip Vietnamese/English mode, reset the syllable buffer, and notify the UI.
+    private func toggleMode() {
+        engine.isVietnameseMode.toggle()
+        engine.resetSession()
+        onModeChanged?(engine.isVietnameseMode)
+    }
+
     // MARK: - Hotkey Detection
 
-    private func isToggleHotkey(keyCode: UInt16, flags: CGEventFlags) -> Bool {
+    /// Whether this keyDown is the configured toggle shortcut.
+    ///
+    /// Only ⌃⌥⇧⌘ take part in the comparison: CapsLock, Fn, and the numeric-pad
+    /// bit ride along on ordinary keystrokes, so folding them in would make the
+    /// shortcut fail depending on how the key was reached. Fn+⌥Z therefore also
+    /// matches an ⌥Z binding, which is deliberate — Fn has its own toggle.
+    private func isToggleHotkey(event: CGEvent, keyCode: UInt16, flags: CGEventFlags) -> Bool {
+        // Modifier-only shortcuts never match on a key press.
+        guard !toggleHotkeyModifierOnly else { return false }
         guard keyCode == toggleHotkeyKeyCode else { return false }
 
         // Check that the required modifier is pressed
-        let relevantFlags = flags.intersection([.maskShift, .maskControl, .maskAlternate, .maskCommand])
+        let relevantFlags = flags.intersection(HotkeyManager.recognizedModifiers)
         Log.debug("Hotkey check: relevantFlags=0x\(String(relevantFlags.rawValue, radix: 16)) expected=0x\(String(toggleHotkeyModifiers.rawValue, radix: 16))")
         return relevantFlags == toggleHotkeyModifiers
     }

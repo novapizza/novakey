@@ -72,6 +72,35 @@ jobs:
           name: novakey-macos
           path: NovaKey-macos.zip
 
+      - name: Fetch Sparkle tools
+        run: |
+          set -euo pipefail
+          curl -fL -o sparkle.tar.xz \
+            https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/Sparkle-2.6.4.tar.xz
+          mkdir sparkle && tar -xf sparkle.tar.xz -C sparkle
+
+      - name: Generate + sign appcast
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          R2_PUBLIC_BASE: ${{ secrets.R2_PUBLIC_BASE }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir feed && cp NovaKey-macos.zip feed/
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > ed_private.pem
+          trap 'rm -f ed_private.pem' EXIT
+          # download-url-prefix points at the versioned R2 path for this tag.
+          ./sparkle/bin/generate_appcast \
+            --ed-key-file ed_private.pem \
+            --download-url-prefix "${R2_PUBLIC_BASE}/${TAG}/" \
+            feed
+          cp feed/appcast.xml appcast.xml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: novakey-appcast
+          path: appcast.xml
+
   # ── Windows: build Rust port + signtool + Azure Trusted Signing ───────────
   # Builds novakey-win (crossplatform/windows) → NovaKey.exe, signs via
   # Azure Trusted Signing, packages the zip.
@@ -166,6 +195,26 @@ jobs:
           generate_release_notes: true
           files: dist/*.zip
 
+      - name: Build Windows update manifest (latest.json)
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          R2_PUBLIC_BASE: ${{ secrets.R2_PUBLIC_BASE }}
+        run: |
+          set -euo pipefail
+          VER="${TAG#v}"
+          SHA="$(sha256sum dist/NovaKey-windows.zip | cut -d' ' -f1)"
+          cat > dist/latest.json <<EOF
+          {
+            "version": "${VER}",
+            "windows": {
+              "url": "${R2_PUBLIC_BASE}/${TAG}/NovaKey-windows.zip",
+              "sha256": "${SHA}"
+            },
+            "notes": "See the GitHub release for ${TAG}."
+          }
+          EOF
+          cat dist/latest.json
+
       - name: Upload assets to Cloudflare R2
         env:
           TAG:                   ${{ github.event.inputs.tag || github.ref_name }}
@@ -182,4 +231,12 @@ jobs:
             base="$(basename "$f")"
             aws s3 cp "$f" "s3://${R2_BUCKET}/${TAG}/${base}" --endpoint-url "$ENDPOINT"
             aws s3 cp "$f" "s3://${R2_BUCKET}/latest/${base}"  --endpoint-url "$ENDPOINT"
+          done
+
+          # Update feeds: versioned copy + rolling latest.
+          for feed in latest.json appcast.xml; do
+            if [[ -f "dist/$feed" ]]; then
+              aws s3 cp "dist/$feed" "s3://${R2_BUCKET}/${TAG}/${feed}"  --endpoint-url "$ENDPOINT" --cache-control "no-cache"
+              aws s3 cp "dist/$feed" "s3://${R2_BUCKET}/latest/${feed}"  --endpoint-url "$ENDPOINT" --cache-control "no-cache"
+            fi
           done

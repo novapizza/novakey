@@ -1,7 +1,10 @@
 // NovaKey Test Runner
-// Compile: swiftc -o /tmp/novakey_tests Sources/NovaKey/Engine/*.swift Tests/run_tests.swift -framework Carbon
+// Compile: swiftc -o /tmp/novakey_tests Sources/NovaKey/Engine/*.swift \
+//              Sources/NovaKey/Settings/*.swift Sources/NovaKey/App/Constants.swift \
+//              Tests/run_tests.swift -framework Carbon
 // Run:     /tmp/novakey_tests
 
+import CoreGraphics
 import Foundation
 
 // ============================================================
@@ -112,6 +115,73 @@ func typeThenSpace(_ chars: String) -> (space: EngineResult, composed: String) {
         let isShift = char.isUppercase
         let keyCode = keyCodeFor(lower)
         _ = engine.processKey(keyCode: keyCode, isShift: isShift)
+    }
+    let composed = engine.buffer.text
+    let result = engine.processKey(keyCode: KeyCode.space.rawValue)
+    return (result, composed)
+}
+
+/// Type a sequence of letters with Quick Vietnamese optionally enabled.
+func typeQuick(_ chars: String, quick: Bool) -> String {
+    let engine = TelexEngine()
+    engine.isVietnameseMode = true
+    engine.quickVietnamese = quick
+    for char in chars {
+        let lower = char.lowercased().first!
+        let isShift = char.isUppercase
+        let keyCode = keyCodeFor(lower)
+        _ = engine.processKey(keyCode: keyCode, isShift: isShift)
+    }
+    return engine.buffer.text
+}
+
+/// Type a sequence of letters with Deferred diacritics ("Bỏ dấu sau")
+/// optionally enabled. Deferred diacritics requires Quick Vietnamese, so
+/// enabling it turns on both flags. Returns the composed buffer text.
+func typeDeferred(_ chars: String, deferred: Bool) -> String {
+    let engine = TelexEngine()
+    engine.isVietnameseMode = true
+    engine.quickVietnamese = deferred
+    engine.deferredDiacritics = deferred
+    for char in chars {
+        let lower = char.lowercased().first!
+        _ = engine.processKey(keyCode: keyCodeFor(lower), isShift: char.isUppercase)
+    }
+    return engine.buffer.text
+}
+
+/// Apply every EngineResult to a running visible string -- validates exact
+/// backspace counts, not just the final buffer text.
+func simulateDeferred(_ chars: String, deferred: Bool) -> String {
+    let engine = TelexEngine()
+    engine.isVietnameseMode = true
+    engine.quickVietnamese = deferred
+    engine.deferredDiacritics = deferred
+    var visible: [Character] = []
+    for char in chars {
+        let isShift = char.isUppercase
+        let lower = char.lowercased().first!
+        let result = engine.processKey(keyCode: keyCodeFor(lower), isShift: isShift)
+        switch result {
+        case .passThrough, .wordBreak:
+            visible.append(isShift ? Character(lower.uppercased()) : lower)
+        case .replace(let bs, let text), .restore(let bs, let text):
+            visible.removeLast(min(bs, visible.count))
+            visible.append(contentsOf: text)
+        }
+    }
+    return String(visible)
+}
+
+/// Type letters (deferred on) then a space; return (break result, composed).
+func typeThenSpaceDeferred(_ chars: String) -> (space: EngineResult, composed: String) {
+    let engine = TelexEngine()
+    engine.isVietnameseMode = true
+    engine.quickVietnamese = true
+    engine.deferredDiacritics = true
+    for char in chars {
+        let lower = char.lowercased().first!
+        _ = engine.processKey(keyCode: keyCodeFor(lower), isShift: char.isUppercase)
     }
     let composed = engine.buffer.text
     let result = engine.processKey(keyCode: KeyCode.space.rawValue)
@@ -748,6 +818,455 @@ test("correction (2 r's) + space -> 'corection' (known n-press limit, no restore
     let (result, composed) = typeThenSpace("correction")
     try expect(composed, "corection")
     try expect(result, EngineResult.wordBreak)
+}
+
+// ============================================================
+// Quick Vietnamese (opt-in: w after an initial consonant -> ư)
+// ============================================================
+print("\n--- Quick Vietnamese ---")
+
+let uHorn = "\u{01B0}" // ư
+
+test("QV: single-consonant initials -> ư") {
+    for initc in ["b", "c", "d", "g", "h", "l", "m", "n", "r", "s", "t", "v", "x"] {
+        try expect(typeQuick("\(initc)w", quick: true), "\(initc)\(uHorn)")
+    }
+}
+
+test("QV: digraph/trigraph initials -> ư") {
+    for initc in ["ch", "kh", "ng", "nh", "ph", "th", "tr"] {
+        try expect(typeQuick("\(initc)w", quick: true), "\(initc)\(uHorn)")
+    }
+}
+
+test("QV: d-stroke initials (dw -> dư, ddw -> đư)") {
+    try expect(typeQuick("dw", quick: true), "d\(uHorn)")
+    try expect(typeQuick("ddw", quick: true), "\u{0111}\(uHorn)") // đư
+}
+
+test("QV: preserves uppercase initial (Tw -> Tư)") {
+    try expect(typeQuick("Tw", quick: true), "T\(uHorn)")
+}
+
+test("QV: composes a full word (twowng -> tương)") {
+    try expect(typeQuick("twowng", quick: true), "t\(uHorn)\u{01A1}ng") // tương
+}
+
+test("QV off by default leaves tw / chw literal") {
+    try expect(typeQuick("tw", quick: false), "tw")
+    try expect(typeQuick("chw", quick: false), "chw")
+}
+
+test("QV: only listed initials trigger (kw, pw stay literal)") {
+    try expect(typeQuick("kw", quick: true), "kw")
+    try expect(typeQuick("pw", quick: true), "pw")
+}
+
+test("QV: standalone w still becomes ư") {
+    try expect(typeQuick("w", quick: true), uHorn)
+}
+
+test("QV: uw after vowel unchanged (tuw -> tư)") {
+    try expect(typeQuick("tuw", quick: true), "t\(uHorn)")
+    try expect(typeQuick("tuw", quick: false), "t\(uHorn)")
+}
+
+test("QV: double-w escapes conjured ư to literal (tww -> tw)") {
+    try expect(typeQuick("tww", quick: true), "tw")
+    try expect(typeQuick("chww", quick: true), "chw")
+    try expect(typeQuick("sww", quick: true), "sw")
+    try expect(typeQuick("ngww", quick: true), "ngw")
+}
+
+test("QV: standalone double-w still escapes (ww -> w) both modes") {
+    try expect(typeQuick("ww", quick: true), "w")
+    try expect(typeQuick("ww", quick: false), "w")
+}
+
+test("QV: real uw double-w still reverts the u (tuww -> tuw)") {
+    try expect(typeQuick("tuww", quick: true), "tuw")
+}
+
+// ============================================================
+// "Huawei" fix: ưa + w reverts to literal "uaw" (both modes)
+// ============================================================
+print("\n--- Huawei / ưa+w revert ---")
+
+test("uaww -> uaw (no ưă syllable) both modes") {
+    try expect(typeQuick("uaww", quick: true), "uaw")
+    try expect(typeQuick("uaww", quick: false), "uaw")
+    try expect(typeQuick("huaww", quick: true), "huaw")
+    try expect(typeQuick("huaww", quick: false), "huaw")
+}
+
+test("Huawei composes literally (QV on)") {
+    try expect(typeQuick("Huawei", quick: true), "Huawei")
+}
+
+// ============================================================
+// Real-time English-word guard (Quick Vietnamese only)
+// ============================================================
+print("\n--- English-word guard ---")
+
+test("guard: huawei stays literal mid-word (QV on)") {
+    try expect(typeQuick("huawei", quick: true), "huawei")
+}
+
+test("guard: other mixed words stay literal (QV on)") {
+    try expect(typeQuick("await", quick: true), "await")
+    try expect(typeQuick("sword", quick: true), "sword")
+    try expect(typeQuick("nuance", quick: true), "nuance")
+}
+
+test("guard: default mode keeps legacy mid-word (huawei -> hưaei)") {
+    try expect(typeQuick("huawei", quick: false), "h\(uHorn)aei") // hưaei
+}
+
+test("guard: genuine Vietnamese words unaffected (QV on)") {
+    try expect(typeQuick("muaw", quick: true), "m\(uHorn)a")       // mưa
+    try expect(typeQuick("huaws", quick: true), "h\u{1EE9}a")      // hứa
+    try expect(typeQuick("thuwowng", quick: true), "th\(uHorn)\u{01A1}ng") // thương
+    try expect(typeQuick("chuaw", quick: true), "ch\(uHorn)a")     // chưa
+    try expect(typeQuick("xuaw", quick: true), "x\(uHorn)a")       // xưa
+}
+
+// ============================================================
+// Deferred diacritics ("Bỏ dấu sau") -- opt-in sub-option of Quick Vietnamese
+// ============================================================
+print("\n--- Deferred diacritics ---")
+
+// Deferred đ
+test("deferred: did -> đi") {
+    try expect(typeDeferred("did", deferred: true), "\u{0111}i")
+}
+test("deferred: Did -> Đi (uppercase)") {
+    try expect(typeDeferred("Did", deferred: true), "\u{0110}i")
+}
+test("deferred: dend -> đen") {
+    try expect(typeDeferred("dend", deferred: true), "\u{0111}en")
+}
+test("deferred: dad -> đa (valid shape, by design)") {
+    try expect(typeDeferred("dad", deferred: true), "\u{0111}a")
+}
+test("deferred: did backspace count") {
+    try expect(simulateDeferred("did", deferred: true), "\u{0111}i")
+}
+
+// Deferred circumflex
+test("deferred: thana -> thân") {
+    try expect(typeDeferred("thana", deferred: true), "th\u{00E2}n")
+}
+test("deferred: viene -> viên") {
+    try expect(typeDeferred("viene", deferred: true), "vi\u{00EA}n")
+}
+test("deferred: nguyene -> nguyên") {
+    try expect(typeDeferred("nguyene", deferred: true), "nguy\u{00EA}n")
+}
+test("deferred: thana backspace count") {
+    try expect(simulateDeferred("thana", deferred: true), "th\u{00E2}n")
+}
+
+// Both forms + tone interplay
+test("deferred: dongdo -> đông (đ then ô)") {
+    try expect(typeDeferred("dongdo", deferred: true), "\u{0111}\u{00F4}ng")
+}
+test("deferred: dongod -> đông (ô then đ)") {
+    try expect(typeDeferred("dongod", deferred: true), "\u{0111}\u{00F4}ng")
+}
+test("deferred: muonso -> muốn (tone then deferred vowel)") {
+    try expect(typeDeferred("muonso", deferred: true), "mu\u{1ED1}n")
+}
+test("deferred: muonos -> muốn (deferred vowel then tone)") {
+    try expect(typeDeferred("muonos", deferred: true), "mu\u{1ED1}n")
+}
+test("deferred: nguyenxe -> nguyễn (tone re-placement)") {
+    try expect(typeDeferred("nguyenxe", deferred: true), "nguy\u{1EC5}n")
+}
+
+// Undo / escape (n+1 convention)
+test("deferred: didd escapes to did") {
+    try expect(typeDeferred("didd", deferred: true), "did")
+}
+test("deferred: thanaa escapes to thana") {
+    try expect(typeDeferred("thanaa", deferred: true), "thana")
+}
+test("deferred: dataa escapes to data") {
+    try expect(typeDeferred("dataa", deferred: true), "data")
+}
+test("deferred: photoo escapes to photo") {
+    try expect(typeDeferred("photoo", deferred: true), "photo")
+}
+
+// English guard: invalid results revert to literal in real time
+test("deferred guard: disabled stays literal") {
+    try expect(simulateDeferred("disabled", deferred: true), "disabled")
+}
+test("deferred guard: banana stays literal") {
+    try expect(simulateDeferred("banana", deferred: true), "banana")
+}
+test("deferred guard: cocoa stays literal") {
+    try expect(simulateDeferred("cocoa", deferred: true), "cocoa")
+}
+test("deferred guard: dido stays literal (bare deferred đ then invalid)") {
+    try expect(simulateDeferred("dido", deferred: true), "dido")
+}
+test("deferred guard: seven stays literal") {
+    try expect(simulateDeferred("seven", deferred: true), "seven")
+}
+test("deferred guard: element stays literal") {
+    try expect(simulateDeferred("element", deferred: true), "element")
+}
+
+// Never fires: open nuclei, wrong shapes
+test("deferred: khoeo open nucleus untouched") {
+    try expect(typeDeferred("khoeo", deferred: true), "khoeo")
+}
+test("deferred: xoong unchanged from default (adjacent oo wins)") {
+    try expect(typeDeferred("xoong", deferred: true), typeDeferred("xoong", deferred: false))
+    try expect(typeDeferred("xooong", deferred: true), "xoong")
+}
+test("deferred: add stays add (chars[0] not d for deferred)") {
+    try expect(typeDeferred("add", deferred: true), "add")
+}
+
+// Word break
+test("deferred: dend survives word break") {
+    let (result, composed) = typeThenSpaceDeferred("dend")
+    try expect(composed, "\u{0111}en")
+    try expect(result, EngineResult.wordBreak)
+}
+test("deferred: adjacent dd survives word break") {
+    let (result, composed) = typeThenSpaceDeferred("dd")
+    try expect(composed, "\u{0111}")
+    try expect(result, EngineResult.wordBreak)
+}
+
+// Documented limitation: valid-shaped English words transform
+test("deferred: data -> dât (documented trade-off)") {
+    try expect(typeDeferred("data", deferred: true), "d\u{00E2}t")
+}
+
+// Gating: inert without Quick Vietnamese
+test("deferred: inert without Quick Vietnamese") {
+    let e = TelexEngine()
+    e.isVietnameseMode = true
+    e.deferredDiacritics = true // quickVietnamese stays off
+    for char in "did" { _ = e.processKey(keyCode: keyCodeFor(char), isShift: false) }
+    try expect(e.buffer.text, "did")
+
+    let e2 = TelexEngine()
+    e2.isVietnameseMode = true
+    e2.deferredDiacritics = true
+    for char in "thana" { _ = e2.processKey(keyCode: keyCodeFor(char), isShift: false) }
+    try expect(e2.buffer.text, "thana")
+}
+
+// Flag off: today's behavior unchanged
+test("deferred off: regressions") {
+    try expect(typeDeferred("did", deferred: false), "did")
+    try expect(typeDeferred("thana", deferred: false), "thana")
+    try expect(typeDeferred("dend", deferred: false), "dend")
+    try expect(typeDeferred("data", deferred: false), "data")
+    try expect(typeDeferred("dongdo", deferred: false), "dongdo")
+}
+
+// ============================================================
+// Toggle-shortcut Tests
+// ============================================================
+print("\n--- Toggle shortcut Tests ---")
+
+test("hotkey: describes combinations in canonical order") {
+    try expect(
+        HotkeyManager.describe(keyCode: KeyCode.z.rawValue, modifiers: .maskAlternate),
+        "Option+Z"
+    )
+    try expect(
+        HotkeyManager.describe(
+            keyCode: KeyCode.space.rawValue,
+            modifiers: [.maskCommand, .maskShift, .maskControl, .maskAlternate]
+        ),
+        "Ctrl+Option+Shift+Cmd+Space"
+    )
+}
+
+test("hotkey: labels letters, punctuation and function keys") {
+    try expect(HotkeyManager.keyLabel(KeyCode.a.rawValue), "A")
+    try expect(HotkeyManager.keyLabel(KeyCode.slash.rawValue), "/")
+    try expect(HotkeyManager.keyLabel(0x7A), "F1")
+    try expect(HotkeyManager.keyLabel(0x6F), "F12")
+}
+
+test("hotkey: symbols render as chips") {
+    try expect(
+        HotkeyManager.symbols(keyCode: KeyCode.z.rawValue, modifiers: .maskAlternate),
+        ["⌥", "Z"]
+    )
+}
+
+test("hotkey: rejects modifier-less ordinary keys") {
+    // Bare keys would be swallowed by the tap in every application.
+    try expectTrue(HotkeyManager.validate(keyCode: KeyCode.z.rawValue, modifiers: []).isReject)
+    try expectTrue(HotkeyManager.validate(keyCode: KeyCode.space.rawValue, modifiers: []).isReject)
+}
+
+test("hotkey: allows modifier-less function keys") {
+    try expect(HotkeyManager.validate(keyCode: 0x7A, modifiers: []), .ok)  // F1
+}
+
+test("hotkey: rejects Shift-only combinations") {
+    try expectTrue(HotkeyManager.validate(keyCode: KeyCode.a.rawValue, modifiers: .maskShift).isReject)
+    try expect(
+        HotkeyManager.validate(keyCode: KeyCode.a.rawValue, modifiers: [.maskShift, .maskControl]),
+        .ok
+    )
+}
+
+test("hotkey: warns on system shortcuts but allows them") {
+    let verdict = HotkeyManager.validate(keyCode: KeyCode.q.rawValue, modifiers: .maskCommand)
+    try expectFalse(verdict.isReject)
+    try expectFalse(verdict.message == nil)
+}
+
+test("hotkey: default binding is valid") {
+    try expect(
+        HotkeyManager.validate(
+            keyCode: HotkeyManager.defaultKeyCode,
+            modifiers: HotkeyManager.defaultModifiers
+        ),
+        .ok
+    )
+}
+
+// MARK: Modifier-only shortcuts (⌃⇧ and friends)
+
+test("hotkey: accepts two-modifier combinations") {
+    try expect(HotkeyManager.validateModifierOnly([.maskControl, .maskShift]), .ok)
+    try expect(HotkeyManager.validateModifierOnly([.maskCommand, .maskAlternate]), .ok)
+}
+
+test("hotkey: rejects single-modifier combinations") {
+    // One modifier is held constantly while typing.
+    try expectTrue(HotkeyManager.validateModifierOnly(.maskShift).isReject)
+    try expectTrue(HotkeyManager.validateModifierOnly([]).isReject)
+}
+
+test("hotkey: describes modifier-only shortcuts by their modifiers") {
+    try expect(
+        HotkeyManager.describe(
+            keyCode: KeyCode.z.rawValue,
+            modifiers: [.maskControl, .maskShift],
+            modifierOnly: true
+        ),
+        "Ctrl+Shift"
+    )
+    try expect(
+        HotkeyManager.symbols(
+            keyCode: KeyCode.z.rawValue,
+            modifiers: [.maskControl, .maskShift],
+            modifierOnly: true
+        ),
+        ["⌃", "⇧"]
+    )
+}
+
+test("hotkey: watcher fires once on release") {
+    var w = HotkeyManager.ComboWatcher()
+    w.setCombo([.maskControl, .maskShift])
+    try expectFalse(w.flagsChanged(to: .maskControl))
+    try expectFalse(w.flagsChanged(to: [.maskControl, .maskShift]))
+    try expectTrue(w.flagsChanged(to: .maskControl))
+    try expectFalse(w.flagsChanged(to: []))
+}
+
+test("hotkey: watcher ignores combinations used as a shortcut") {
+    // ⌃⇧S must stay a normal shortcut for the focused app.
+    var w = HotkeyManager.ComboWatcher()
+    w.setCombo([.maskControl, .maskShift])
+    _ = w.flagsChanged(to: .maskControl)
+    _ = w.flagsChanged(to: [.maskControl, .maskShift])
+    w.keyPressed()
+    try expectFalse(w.flagsChanged(to: .maskControl))
+    try expectFalse(w.flagsChanged(to: []))
+}
+
+test("hotkey: watcher ignores partial and extra modifiers") {
+    var w = HotkeyManager.ComboWatcher()
+    w.setCombo([.maskControl, .maskShift])
+    // Control alone.
+    _ = w.flagsChanged(to: .maskControl)
+    try expectFalse(w.flagsChanged(to: []))
+    // A superset is not the combination.
+    _ = w.flagsChanged(to: .maskControl)
+    _ = w.flagsChanged(to: [.maskControl, .maskAlternate])
+    _ = w.flagsChanged(to: [.maskControl, .maskAlternate, .maskShift])
+    try expectFalse(w.flagsChanged(to: [.maskControl, .maskAlternate]))
+    try expectFalse(w.flagsChanged(to: .maskControl))
+    try expectFalse(w.flagsChanged(to: []))
+}
+
+test("hotkey: watcher re-arms between presses") {
+    var w = HotkeyManager.ComboWatcher()
+    w.setCombo([.maskControl, .maskShift])
+    for _ in 0..<2 {
+        _ = w.flagsChanged(to: .maskControl)
+        _ = w.flagsChanged(to: [.maskControl, .maskShift])
+        try expectTrue(w.flagsChanged(to: .maskControl))
+        _ = w.flagsChanged(to: [])
+    }
+}
+
+test("hotkey: watcher is inert without a combination") {
+    var w = HotkeyManager.ComboWatcher()
+    _ = w.flagsChanged(to: .maskControl)
+    _ = w.flagsChanged(to: [.maskControl, .maskShift])
+    try expectFalse(w.flagsChanged(to: .maskControl))
+    try expectFalse(w.flagsChanged(to: []))
+}
+
+test("hotkey: keycode 0 (A) survives a round trip") {
+    // Regression: `A` is virtual keycode 0x00, which a zero-means-unset getter
+    // silently turned back into the default Z.
+    let settings = AppSettings.shared
+    let oldKey = settings.toggleHotkeyKeyCode
+    let oldMods = settings.toggleHotkeyModifiers
+    defer {
+        settings.toggleHotkeyKeyCode = oldKey
+        settings.toggleHotkeyModifiers = oldMods
+    }
+
+    settings.toggleHotkeyKeyCode = KeyCode.a.rawValue
+    settings.toggleHotkeyModifiers = CGEventFlags.maskAlternate.rawValue
+    try expect(settings.toggleHotkeyKeyCode, KeyCode.a.rawValue)
+    try expect(HotkeyManager.currentSymbols, ["⌥", "A"])
+}
+
+test("hotkey: modifier-less stored value falls back to the default") {
+    let settings = AppSettings.shared
+    let oldKey = settings.toggleHotkeyKeyCode
+    let oldMods = settings.toggleHotkeyModifiers
+    defer {
+        settings.toggleHotkeyKeyCode = oldKey
+        settings.toggleHotkeyModifiers = oldMods
+    }
+
+    settings.toggleHotkeyModifiers = 0
+    try expect(settings.toggleHotkeyModifiers, HotkeyManager.defaultModifiers.rawValue)
+}
+
+test("hotkey: reset restores the default binding") {
+    let settings = AppSettings.shared
+    let oldKey = settings.toggleHotkeyKeyCode
+    let oldMods = settings.toggleHotkeyModifiers
+    defer {
+        settings.toggleHotkeyKeyCode = oldKey
+        settings.toggleHotkeyModifiers = oldMods
+    }
+
+    settings.toggleHotkeyKeyCode = KeyCode.j.rawValue
+    settings.toggleHotkeyModifiers = CGEventFlags.maskCommand.rawValue
+    settings.resetToggleHotkey()
+    try expect(settings.toggleHotkeyKeyCode, HotkeyManager.defaultKeyCode)
+    try expect(settings.toggleHotkeyModifiers, HotkeyManager.defaultModifiers.rawValue)
 }
 
 } // end runAllTests()

@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var eventTapManager: EventTapManager!
     private var statusBarController: StatusBarController!
     private var settingsWindow: NSWindow?
+    private var permissionsWindow: NSWindow?
     private let browserWatcher = BrowserWatcher()
 
     // MARK: - App Lifecycle
@@ -25,6 +26,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Initialize engine
         engine = TelexEngine()
         engine.isVietnameseMode = AppSettings.shared.isVietnameseMode
+        engine.quickVietnamese = AppSettings.shared.quickVietnamese
+        engine.deferredDiacritics = AppSettings.shared.deferredDiacritics
         Log.info("Engine initialized, Vietnamese mode: \(engine.isVietnameseMode)")
 
         // Initialize event tap
@@ -71,17 +74,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController.onQuit = {
             NSApplication.shared.terminate(nil)
         }
+        statusBarController.onCheckForUpdates = {
+            UpdaterController.shared.checkForUpdates()
+        }
 
         // Track the frontmost app so the autocomplete guard is scoped to
         // browsers. Push the flag into the sender on every activation change.
         browserWatcher.onChange = { [weak self] kind in
             self?.eventTapManager.keySender.browserKind = kind
         }
+        browserWatcher.onFlickerProneChange = { [weak self] prone in
+            self?.eventTapManager.keySender.reduceFlicker = prone
+        }
+        // Every app switch: the syllable buffer describes text in the app we just
+        // left, so drop it, and take the opportunity to verify the tap is still
+        // alive. NovaKey is LSUIElement and never becomes active itself, so
+        // applicationDidBecomeActive is not a usable hook for this.
+        browserWatcher.onActivate = { [weak self] _ in
+            guard let self else { return }
+            self.engine.resetSession()
+            self.eventTapManager?.checkHealth()
+        }
         browserWatcher.start()
         eventTapManager.keySender.browserKind = browserWatcher.kind
+        eventTapManager.keySender.reduceFlicker = browserWatcher.isFlickerProne
 
-        // Start event tap
-        startEventTap()
+        // Start the event tap only once permissions are verified; otherwise
+        // show the non-modal onboarding window. No system prompts fire here.
+        if AccessibilityPermission.isGranted {
+            startEventTap()
+        } else {
+            Log.info("Permissions missing -- showing onboarding")
+            showPermissionsOnboarding()
+        }
 
         // Register for sleep/wake notifications
         let workspace = NSWorkspace.shared.notificationCenter
@@ -92,6 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Enable launch at login
         enableLaunchAtLogin()
+        _ = UpdaterController.shared
 
         Log.info("NovaKey started successfully")
     }
@@ -101,8 +127,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.info("NovaKey terminated")
     }
 
+    /// Recheck permissions whenever the user comes back to NovaKey (e.g.
+    /// after granting one in System Settings). Replaces the old 2s polling.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard eventTapManager != nil, !eventTapManager.isRunning else { return }
+        if AccessibilityPermission.isGranted {
+            startEventTap()
+        }
+    }
+
     // MARK: - Event Tap
 
+    /// Start the tap. Never prompts or polls; on failure it (re-)shows the
+    /// non-modal onboarding window so the user drives the permission flow.
     private func startEventTap() {
         guard eventTapManager != nil else {
             Log.error("Cannot start: EventTapManager is nil")
@@ -111,23 +148,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if eventTapManager.start() {
             Log.info("Event tap started OK")
+            eventTapManager.logDiagnostics(context: "start")
+            permissionsWindow?.close()
+            permissionsWindow = nil
         } else {
-            Log.error("Event tap FAILED -- requesting permission...")
-            AccessibilityPermission.requestAccess()
-            AccessibilityPermission.showPermissionAlert()
-            pollForPermission()
+            Log.error("Event tap FAILED -- showing permissions onboarding")
+            showPermissionsOnboarding()
         }
     }
 
-    /// Poll every 2 seconds until permission is granted, then start the event tap.
-    private func pollForPermission() {
-        Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
-            if AccessibilityPermission.isGranted {
-                timer.invalidate()
-                Log.info("Permission granted via polling")
-                self?.startEventTap()
-            }
+    // MARK: - Permissions Onboarding
+
+    private func showPermissionsOnboarding() {
+        if let window = permissionsWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
         }
+
+        let view = PermissionsOnboardingView(onCheckAgain: { [weak self] in
+            guard let self else { return }
+            if AccessibilityPermission.isGranted {
+                self.startEventTap()
+            }
+        })
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 320),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "NovaKey Setup"
+        window.contentView = NSHostingView(rootView: view)
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        self.permissionsWindow = window
     }
 
     // MARK: - Settings
@@ -138,6 +196,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         eventTapManager.keySender.stepByStepMode = settings.sendKeyStepByStep
         eventTapManager.toggleHotkeyKeyCode = settings.toggleHotkeyKeyCode
         eventTapManager.toggleHotkeyModifiers = CGEventFlags(rawValue: settings.toggleHotkeyModifiers)
+        eventTapManager.toggleHotkeyModifierOnly = settings.toggleHotkeyModifierOnly
+        eventTapManager.switchWithFnKey = settings.switchWithFnKey
+        engine.quickVietnamese = settings.quickVietnamese
+        engine.deferredDiacritics = settings.deferredDiacritics
     }
 
     private func showSettings() {
@@ -184,13 +246,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Sleep / Wake
 
     @objc private func handleSleep(_ notification: Notification) {
+        eventTapManager?.logDiagnostics(context: "sleep")
         eventTapManager?.stop()
         Log.info("Stopped for sleep")
     }
 
     @objc private func handleWake(_ notification: Notification) {
+        Log.info("Woke from sleep -- restarting tap in 1s")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.startEventTap()
+            self?.eventTapManager?.logDiagnostics(context: "wake")
         }
     }
 

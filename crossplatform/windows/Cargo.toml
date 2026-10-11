@@ -1,6 +1,6 @@
 [package]
 name = "novakey-win"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 description = "NovaKey Windows app — low-level keyboard hook + SendInput Telex IME"
 license = "MIT"
@@ -11,6 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 novakey-core = { path = "../core" }
+# Exception to the minimal-crate rule: release zips are produced by
+# PowerShell Compress-Archive (deflate-compressed entries). Writing a
+# correct, safe deflate zip reader/writer by hand is not worth the risk
+# vs. the well-audited `zip` crate. Pulls only `flate2` transitively.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dependencies.windows]
 version = "0.58"
@@ -27,6 +32,10 @@ features = [
     "Win32_System_SystemInformation",
     "Win32_System_Diagnostics_Debug",
     "Win32_Graphics_Gdi",
+    "Win32_Networking_WinHttp",
+    "Win32_Security_Cryptography",
+    "Win32_Security_WinTrust",
+    "Win32_System_Com",
 ]
 
 [target.'cfg(windows)'.dependencies.windows-sys]

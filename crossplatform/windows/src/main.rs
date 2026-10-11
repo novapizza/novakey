@@ -14,6 +14,7 @@ mod hotkey;
 mod sender;
 mod settings;
 mod tray;
+mod updater;
 mod ui;
 mod vk;
 
@@ -43,10 +44,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetMessageW, GetWindowThreadProcessId, KillTimer, PostQuitMessage, RegisterClassW,
-    RegisterWindowMessageW, SetProcessDPIAware, SetTimer, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND, HHOOK, HMENU, MB_OK, MSG, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_HOTKEY,
+    GetMessageW, GetWindowThreadProcessId, KillTimer, MessageBoxW, PostMessageW,
+    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetProcessDPIAware, SetTimer,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND, HHOOK,
+    HMENU, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MSG, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WINEVENT_OUTOFCONTEXT, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_HOTKEY,
     WM_LBUTTONUP, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
     WS_EX_TOOLWINDOW, WS_POPUP,
 };
@@ -75,6 +77,38 @@ thread_local! {
 
     /// Installed low-level hooks, kept so the watchdog can reinstall them.
     static HOOKS: Cell<(HHOOK, HHOOK)> = Cell::new((HHOOK::default(), HHOOK::default()));
+
+    /// Whether the toggle hotkey is currently registered. `RegisterHotKey` is
+    /// first-come-first-served per session, so a combination another app already
+    /// owns leaves us unbound — surfaced in the tray tooltip and Settings rather
+    /// than failing silently.
+    static HOTKEY_BOUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// The message window, so the keyboard hook can ask for a toggle.
+    static MAIN_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether the toggle hotkey is live. Same thread as the message pump.
+pub(crate) fn hotkey_bound() -> bool {
+    HOTKEY_BOUND.with(|b| b.get())
+}
+
+/// Ask the pump to toggle the language. Called from the keyboard hook when a
+/// modifier-only shortcut completes; posted rather than handled inline so the
+/// hook returns immediately (a slow hook gets dropped by Windows).
+pub(crate) fn post_toggle() {
+    let hwnd = MAIN_HWND.with(|h| h.get());
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let _ = PostMessageW(
+            HWND(hwnd as *mut _),
+            WM_COMMAND,
+            WPARAM(tray::CMD_TOGGLE),
+            LPARAM(0),
+        );
+    }
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -98,13 +132,42 @@ unsafe fn run() {
     // out before installing hooks or a second tray icon. The handle is held for
     // the process lifetime (Windows frees it on exit); we never signal it.
     let mutex_name = wide("Local\\NovaKeySingleInstanceMutex");
-    let _instance_mutex = match CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr())) {
-        Ok(h) => h,
-        Err(_) => return,
+
+    // `--finish-update` means we are the freshly-swapped-in exe relaunched by
+    // the updater; the exiting parent may still hold the mutex briefly, so
+    // retry for a few seconds instead of bailing immediately.
+    let finishing = std::env::args().any(|a| a == "--finish-update");
+
+    let _instance_mutex = {
+        let mut handle = None;
+        let attempts = if finishing { 25 } else { 1 };
+        for _ in 0..attempts {
+            match CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr())) {
+                Ok(h) => {
+                    if GetLastError() == ERROR_ALREADY_EXISTS {
+                        let _ = CloseHandle(h);
+                        if !finishing {
+                            // Normal launch, another instance is genuinely
+                            // running — exit instantly, no retry latency.
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        continue;
+                    }
+                    handle = Some(h);
+                    break;
+                }
+                Err(_) => return,
+            }
+        }
+        match handle {
+            Some(h) => h,
+            None => return, // another instance genuinely running
+        }
     };
-    if GetLastError() == ERROR_ALREADY_EXISTS {
-        // Another instance owns the mutex — exit quietly.
-        return;
+
+    if finishing {
+        updater::finish_pending_update();
     }
 
     // Load persisted settings and apply them.
@@ -171,6 +234,8 @@ unsafe fn run() {
         Err(_) => return,
     };
 
+    MAIN_HWND.with(|h| h.set(hwnd.0 as isize));
+
     // Install the low-level keyboard and mouse hooks on this thread, and keep
     // checking they stay installed.
     install_hooks();
@@ -187,15 +252,45 @@ unsafe fn run() {
         WINEVENT_OUTOFCONTEXT,
     );
 
-    // Toggle hotkey: from settings (defaults to Ctrl+Space).
+    // Toggle hotkey: from settings (defaults to Ctrl+Space). If the saved
+    // combination is already owned by another app, fall back to the default
+    // pair; if that is taken too we start unbound, which the tray tooltip and
+    // the Settings window both spell out.
     let (hk_mods, hk_vk) =
         SETTINGS.with(|s| (s.borrow().hotkey_mods, s.borrow().hotkey_vk));
-    let _ = register_toggle_hotkey(hwnd, hk_mods, hk_vk);
+    if !register_toggle_hotkey(hwnd, hk_mods, hk_vk)
+        && (hk_mods, hk_vk) != (hotkey::DEFAULT_MODS, hotkey::DEFAULT_VK)
+        && register_toggle_hotkey(hwnd, hotkey::DEFAULT_MODS, hotkey::DEFAULT_VK)
+    {
+        SETTINGS.with(|s| {
+            let mut s = s.borrow_mut();
+            s.hotkey_mods = hotkey::DEFAULT_MODS;
+            s.hotkey_vk = hotkey::DEFAULT_VK;
+            s.save();
+        });
+    }
 
     // Tray icon. At sign-in the notification area may not exist yet; keep
     // retrying until it does (TaskbarCreated also covers this when it fires).
     if !tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc()) {
         SetTimer(hwnd, TIMER_TRAY_RETRY, TRAY_RETRY_MS, None);
+    }
+
+    // Background update check: at most once every 24h, silent unless it applies.
+    {
+        let last = SETTINGS.with(|s| s.borrow().last_update_check);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if now.saturating_sub(last) > 86_400 {
+            SETTINGS.with(|s| {
+                let mut s = s.borrow_mut();
+                s.last_update_check = now;
+                s.save();
+            });
+            spawn_update_check(hwnd, /*background=*/ true);
+        }
     }
 
     // Seed the browser flag from the currently-focused window.
@@ -415,6 +510,55 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
+/// Modal notification with NULL owner. Safe to call from a worker thread:
+/// MessageBoxW runs its own modal loop on the calling thread. Owning it to
+/// another thread's window can deadlock, so we intentionally pass no owner.
+fn notify(msg: &str, warn: bool) {
+    let text = wide(msg);
+    let cap = wide("NovaKey");
+    let icon = if warn { MB_ICONWARNING } else { MB_ICONINFORMATION };
+    unsafe {
+        MessageBoxW(HWND::default(), PCWSTR(text.as_ptr()), PCWSTR(cap.as_ptr()), MB_OK | icon);
+    }
+}
+
+/// Run the update check on a worker thread. `background` suppresses the
+/// "already up to date" and failure notifications.
+fn spawn_update_check(hwnd: HWND, background: bool) {
+    let hwnd_val = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        let outcome = updater::check_now();
+        match outcome {
+            updater::UpdateOutcome::Applied => {
+                // New instance is launching; tear this one down cleanly. Win32
+                // forbids destroying a window from a thread other than the one
+                // that created it (DestroyWindow would silently no-op here), so
+                // post WM_CLOSE instead — PostMessageW is documented safe across
+                // threads. The owning thread's wnd_proc has no WM_CLOSE arm, so
+                // it falls through to DefWindowProcW, which calls DestroyWindow
+                // on the owning (pump) thread, triggering the existing
+                // WM_DESTROY handler (tray::remove + PostQuitMessage).
+                unsafe {
+                    let _ = PostMessageW(
+                        HWND(hwnd_val as *mut _),
+                        WM_CLOSE,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            }
+            updater::UpdateOutcome::UpToDate if !background => {
+                notify("NovaKey is up to date.", false);
+            }
+            updater::UpdateOutcome::Failed(reason) if !background => {
+                notify(&format!("Update check failed: {reason}."), true);
+            }
+            // Background checks stay silent; manual up-to-date/failure handled above.
+            _ => {}
+        }
+    });
+}
+
 /// The shell's "TaskbarCreated" broadcast message id (0 if registration fails).
 fn taskbar_created_msg() -> u32 {
     thread_local! {
@@ -445,31 +589,56 @@ unsafe fn do_toggle(hwnd: HWND) {
     ui::refresh();
 }
 
-/// Description of the currently-configured toggle hotkey (e.g. "Ctrl+Space").
+/// Description of the currently-configured toggle hotkey (e.g. "Ctrl+Space"),
+/// flagged when it could not be registered so the tooltip never advertises a
+/// shortcut that does nothing.
 fn current_hotkey_desc() -> String {
-    SETTINGS.with(|s| {
+    let desc = SETTINGS.with(|s| {
         let s = s.borrow();
         hotkey::describe(s.hotkey_mods, s.hotkey_vk)
-    })
+    });
+    if hotkey_bound() {
+        desc
+    } else {
+        format!("{desc} — unavailable")
+    }
 }
 
 /// Register (replacing any existing) the global toggle hotkey. Returns whether
 /// registration succeeded. MOD_NOREPEAT keeps a held combo from auto-firing.
 unsafe fn register_toggle_hotkey(hwnd: HWND, mods: u32, vk: u32) -> bool {
     let _ = UnregisterHotKey(hwnd, HOTKEY_ID);
-    RegisterHotKey(
+
+    // Modifier-only shortcuts (Ctrl+Shift, …) can't go through RegisterHotKey;
+    // the keyboard hook watches for them instead, and can't be refused.
+    if hotkey::is_modifier_only(mods, vk) {
+        hook::set_mod_combo(mods);
+        HOTKEY_BOUND.with(|b| b.set(true));
+        return true;
+    }
+    hook::set_mod_combo(0);
+
+    let ok = RegisterHotKey(
         hwnd,
         HOTKEY_ID,
         HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT.0),
         vk,
     )
-    .is_ok()
+    .is_ok();
+    HOTKEY_BOUND.with(|b| b.set(ok));
+    ok
 }
 
 /// Try to switch to a new toggle hotkey. On success it is persisted and the tray
 /// tooltip refreshed; on failure the previous hotkey is restored so the toggle
 /// never ends up unbound.
 unsafe fn set_toggle_hotkey(hwnd: HWND, mods: u32, vk: u32) -> bool {
+    // Second line of defence: the recorder validates too, but nothing else may
+    // reach RegisterHotKey with a combination that would swallow a bare key.
+    if !hotkey::is_valid(mods, vk) {
+        return false;
+    }
+
     let (old_mods, old_vk) =
         SETTINGS.with(|s| (s.borrow().hotkey_mods, s.borrow().hotkey_vk));
 
@@ -548,6 +717,7 @@ unsafe fn handle_command(hwnd: HWND, cmd: usize) {
             });
             hook::set_fix_autocomplete(new);
         }
+        tray::CMD_UPDATE => spawn_update_check(hwnd, /*background=*/ false),
         tray::CMD_QUIT => {
             let _ = DestroyWindow(hwnd);
         }

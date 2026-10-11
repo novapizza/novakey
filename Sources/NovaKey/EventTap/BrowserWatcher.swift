@@ -52,19 +52,47 @@ final class BrowserWatcher {
         "company.thebrowser.Browser", // Arc
     ]
 
+    /// Bundle IDs of apps whose input field repaints on every discrete text
+    /// change (formatting/spell-check/emoji re-parse per event). Our
+    /// backspace-and-retype burst makes them visibly flicker; KeySender lets
+    /// macOS coalesce the burst there instead of forcing discrete delivery.
+    private static let flickerProneAppIDs: Set<String> = [
+        "com.tdesktop.Telegram", // Telegram Desktop (Qt composer)
+        "ru.keepcoder.Telegram", // Telegram for macOS (native client) — flicker
+                                 // reported in the composer; same repaint-per-
+                                 // discrete-event behavior as the Qt build.
+    ]
+
     /// The kind of the current frontmost app. Read from the event-tap callback;
     /// updated only on the main thread via the activation notification, so a
     /// plain stored value is sufficient (no synchronization needed).
     private(set) var kind: BrowserKind = .none
 
+    /// Whether the frontmost app is flicker-prone (see `flickerProneAppIDs`).
+    /// Same threading contract as `kind`.
+    private(set) var isFlickerProne: Bool = false
+
     /// Invoked whenever `kind` changes (used to push it into KeySender).
     var onChange: ((BrowserKind) -> Void)?
+
+    /// Invoked whenever `isFlickerProne` changes (used to push it into KeySender).
+    var onFlickerProneChange: ((Bool) -> Void)?
+
+    /// Invoked on *every* app activation, before the change guards below.
+    ///
+    /// `onChange`/`onFlickerProneChange` only fire when their cached value
+    /// actually changes, so switching between two non-browsers (Slack → Discord)
+    /// notifies nothing — yet that's exactly when the syllable buffer goes stale
+    /// and the tap's health is worth re-checking. NovaKey is LSUIElement, so
+    /// `applicationDidBecomeActive` never fires for it; this is the only hook.
+    var onActivate: ((NSRunningApplication?) -> Void)?
 
     private var observer: NSObjectProtocol?
 
     func start() {
-        // Seed from the currently-active app.
-        update(app: NSWorkspace.shared.frontmostApplication)
+        // Seed from the currently-active app. Not an activation, so `onActivate`
+        // stays silent here -- there's nothing stale to reset before we begin.
+        update(app: NSWorkspace.shared.frontmostApplication, isActivation: false)
 
         let center = NSWorkspace.shared.notificationCenter
         observer = center.addObserver(
@@ -72,7 +100,7 @@ final class BrowserWatcher {
             object: nil, queue: .main
         ) { [weak self] note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            self?.update(app: app)
+            self?.update(app: app, isActivation: true)
         }
     }
 
@@ -87,8 +115,18 @@ final class BrowserWatcher {
         stop()
     }
 
-    private func update(app: NSRunningApplication?) {
+    private func update(app: NSRunningApplication?, isActivation: Bool) {
         let bundleID = app?.bundleIdentifier
+
+        // Unconditional, and before the change guards: every activation matters
+        // to the session/health hook even when nothing cached changes.
+        // Logged at info level (not debug) because app switching is the reported
+        // trigger for input dying, so it must be visible in release builds.
+        if isActivation {
+            Log.info("App activated: \(bundleID ?? "?")")
+            onActivate?(app)
+        }
+
         let newKind: BrowserKind
         if let bundleID, Self.nativeBrowserIDs.contains(bundleID) {
             newKind = .native
@@ -97,9 +135,17 @@ final class BrowserWatcher {
         } else {
             newKind = .none
         }
-        guard newKind != kind else { return }
-        kind = newKind
-        Log.debug("Frontmost app '\(bundleID ?? "?")' browserKind=\(newKind)")
-        onChange?(newKind)
+        let newFlickerProne = bundleID.map(Self.flickerProneAppIDs.contains) ?? false
+
+        guard newKind != kind || newFlickerProne != isFlickerProne else { return }
+        Log.info("  -> browserKind=\(newKind) flickerProne=\(newFlickerProne)")
+        if newKind != kind {
+            kind = newKind
+            onChange?(newKind)
+        }
+        if newFlickerProne != isFlickerProne {
+            isFlickerProne = newFlickerProne
+            onFlickerProneChange?(newFlickerProne)
+        }
     }
 }

@@ -35,11 +35,38 @@ mkdir -p "$MACOS" "$RESOURCES"
 cp .build/release/NovaKey "$BIN"
 chmod +x "$BIN"
 
+# Ensure dyld can find embedded Sparkle.framework at Contents/Frameworks.
+# Must run BEFORE codesign (rewriting load commands invalidates the signature).
+# Idempotent: add_rpath errors if already present, so ignore failure.
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$BIN" 2>/dev/null || true
+
 # All resources
 cp Resources/Info.plist            "$CONTENTS/Info.plist"
 cp Resources/AppIcon.icns          "$RESOURCES/AppIcon.icns"
 cp Resources/AppLogo.png           "$RESOURCES/AppLogo.png"
 cp "$ENTITLEMENTS"                  "$RESOURCES/NovaKey.entitlements"
+
+# Sparkle compares CFBundleVersion (sparkle:version in the appcast), not
+# CFBundleShortVersionString, so it must strictly increase per release or the
+# updater reports "you're up to date". Derive it: 0.2.7 -> 207, 1.3.12 -> 10312.
+MARKETING_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$CONTENTS/Info.plist")"
+if [[ ! "$MARKETING_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "✗ CFBundleShortVersionString must be MAJOR.MINOR.PATCH, got '$MARKETING_VERSION'." >&2
+  exit 1
+fi
+IFS=. read -r V_MAJOR V_MINOR V_PATCH <<< "$MARKETING_VERSION"
+BUILD_NUMBER=$(( 10#$V_MAJOR * 10000 + 10#$V_MINOR * 100 + 10#$V_PATCH ))
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$CONTENTS/Info.plist"
+
+# ── Embed Sparkle.framework ─────────────────────────────────────────────────
+FRAMEWORKS="$CONTENTS/Frameworks"
+mkdir -p "$FRAMEWORKS"
+SPARKLE_FW="$(find .build -type d -name 'Sparkle.framework' -path '*artifacts*' | head -1)"
+if [[ -z "$SPARKLE_FW" ]]; then
+  SPARKLE_FW="$(find .build -type d -name 'Sparkle.framework' | head -1)"
+fi
+if [[ -z "$SPARKLE_FW" ]]; then echo "✗ Sparkle.framework not found under .build" >&2; exit 1; fi
+cp -R "$SPARKLE_FW" "$FRAMEWORKS/Sparkle.framework"
 
 # ── Sign ──────────────────────────────────────────────────────────────────
 if [[ -n "${SIGN_IDENTITY:-}" ]]; then
@@ -47,11 +74,29 @@ if [[ -n "${SIGN_IDENTITY:-}" ]]; then
     SIGN_ARGS=(--force --sign "$SIGN_IDENTITY" --options runtime --timestamp
                --entitlements "$ENTITLEMENTS")
     # inside-out: nested code first, then the bundle. No --deep (Apple-discouraged).
+    # Sparkle's nested helpers/XPC first (inside-out), then its framework.
+    SPARKLE="$FRAMEWORKS/Sparkle.framework"
+    if [[ -d "$SPARKLE/Versions/B" ]]; then
+        find "$SPARKLE/Versions/B" \( -name '*.xpc' -o -name '*.app' -o -type f -perm +111 \) \
+            -print0 2>/dev/null | while IFS= read -r -d '' item; do
+            codesign "${SIGN_ARGS[@]}" "$item" || true
+        done
+    fi
+    codesign "${SIGN_ARGS[@]}" "$SPARKLE"
     codesign "${SIGN_ARGS[@]}" "$BIN"
     codesign "${SIGN_ARGS[@]}" "$APP"
     ADHOC=0
 else
     echo "▶ Signing (ad-hoc — local dev only, not distributable)..."
+    # Sparkle's nested helpers/XPC first (inside-out), then its framework.
+    SPARKLE="$FRAMEWORKS/Sparkle.framework"
+    if [[ -d "$SPARKLE/Versions/B" ]]; then
+        find "$SPARKLE/Versions/B" \( -name '*.xpc' -o -name '*.app' -o -type f -perm +111 \) \
+            -print0 2>/dev/null | while IFS= read -r -d '' item; do
+            codesign --force --sign - --entitlements "$ENTITLEMENTS" --options runtime "$item" || true
+        done
+    fi
+    codesign --force --sign - --entitlements "$ENTITLEMENTS" --options runtime "$SPARKLE"
     codesign --force --sign - --entitlements "$ENTITLEMENTS" --options runtime "$BIN"
     codesign --force --sign - --entitlements "$ENTITLEMENTS" --options runtime "$APP"
     ADHOC=1
@@ -94,5 +139,5 @@ if [[ "${NOTARIZE:-0}" == "1" ]]; then
 fi
 
 echo "  Bundle ID: $(defaults read "$(pwd)/$CONTENTS/Info" CFBundleIdentifier)"
-echo "  Version:   $(defaults read "$(pwd)/$CONTENTS/Info" CFBundleShortVersionString)"
+echo "  Version:   $(defaults read "$(pwd)/$CONTENTS/Info" CFBundleShortVersionString) (build $(defaults read "$(pwd)/$CONTENTS/Info" CFBundleVersion))"
 echo "✓ Done: $APP"
