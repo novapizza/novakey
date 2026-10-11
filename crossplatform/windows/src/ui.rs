@@ -7,11 +7,15 @@
 //! button) are hit-tested manually against rectangles recorded during paint.
 //! No GUI dependency is added — this keeps the binary tiny.
 //!
+//! Layout is authored in 96-DPI units; `rect`, `font` and `px` scale it to
+//! the window's current DPI so it stays crisp at any display zoom (the process
+//! is per-monitor DPI aware, see main.rs).
+//!
 //! The window is created on, and its messages pump on, the same thread that
 //! owns `crate::SETTINGS` and the hooks, so it reads/writes shared state without
 //! locking and talks to the main message window via `SendMessageW`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 
 use windows::core::PCWSTR;
@@ -25,16 +29,16 @@ use windows::Win32::Graphics::Gdi::{
     HFONT, HGDIOBJ, HRGN, NULL_PEN, PAINTSTRUCT, SRCCOPY, TRANSPARENT, TRIVERTEX,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRect, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
-    GetSystemMetrics, IsWindow, LoadCursorW, RegisterClassW, SetForegroundWindow,
-    SetWindowPos, ShowWindow, HMENU, IDC_ARROW, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP,
-    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_PAINT, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CAPTION,
-    WS_SYSMENU,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, IsWindow,
+    LoadCursorW, RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow, HMENU,
+    IDC_ARROW, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WM_CLOSE,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_PAINT, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CAPTION, WS_SYSMENU,
 };
 
 use crate::hotkey;
@@ -110,6 +114,20 @@ fn set_capturing(on: bool) {
 
 thread_local! {
     static UI: RefCell<Option<UiState>> = const { RefCell::new(None) };
+    /// DPI of the Settings window's current monitor (96 = 100%).
+    static DPI: Cell<u32> = const { Cell::new(96) };
+}
+
+/// Scale a 96-DPI layout length to the window's current DPI.
+fn px(v: i32) -> i32 {
+    let dpi = DPI.with(|d| d.get()) as f64;
+    (v as f64 * dpi / 96.0).round() as i32
+}
+
+/// Inverse of `px`: device pixels back to 96-DPI layout units.
+fn unpx(v: i32) -> i32 {
+    let dpi = DPI.with(|d| d.get()).max(1) as f64;
+    (v as f64 * 96.0 / dpi).round() as i32
 }
 
 // MARK: - Public entry points (called from main.rs)
@@ -143,16 +161,6 @@ pub unsafe fn open(main_hwnd: HWND) {
     RegisterClassW(&wc);
 
     let style = WS_CAPTION | WS_SYSMENU;
-    let mut rect = RECT {
-        left: 0,
-        top: 0,
-        right: CLIENT_W,
-        bottom: CLIENT_H,
-    };
-    let _ = AdjustWindowRect(&mut rect, style, false);
-    let win_w = rect.right - rect.left;
-    let win_h = rect.bottom - rect.top;
-
     let title = wide("NovaKey Settings");
     let hwnd = match CreateWindowExW(
         Default::default(),
@@ -161,8 +169,8 @@ pub unsafe fn open(main_hwnd: HWND) {
         style,
         0,
         0,
-        win_w,
-        win_h,
+        CLIENT_W,
+        CLIENT_H,
         HWND::default(),
         HMENU::default(),
         hinst,
@@ -182,17 +190,23 @@ pub unsafe fn open(main_hwnd: HWND) {
         });
     });
 
-    // Center on the primary monitor.
+    // Size for the monitor's DPI, then center on the primary monitor.
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    DPI.with(|d| d.set(dpi));
+    let mut frame = rect(0, 0, CLIENT_W, CLIENT_H);
+    let _ = AdjustWindowRectExForDpi(&mut frame, style, false, Default::default(), dpi);
+    let win_w = frame.right - frame.left;
+    let win_h = frame.bottom - frame.top;
     let sw = GetSystemMetrics(SM_CXSCREEN);
     let sh = GetSystemMetrics(SM_CYSCREEN);
     let _ = SetWindowPos(
         hwnd,
         HWND::default(),
         (sw - win_w) / 2,
-        (sh - win_h) / 3,
-        0,
-        0,
-        SWP_NOSIZE | SWP_NOZORDER,
+        ((sh - win_h) / 3).max(0),
+        win_w,
+        win_h,
+        SWP_NOZORDER,
     );
 
     let _ = ShowWindow(hwnd, SW_SHOW);
@@ -220,6 +234,23 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_ERASEBKGND => LRESULT(1), // fully repainted in WM_PAINT
+        WM_DPICHANGED => {
+            // Moved to a monitor with a different zoom (or zoom changed):
+            // adopt the new DPI and the frame Windows suggests for it.
+            DPI.with(|d| d.set(((wparam.0 >> 16) & 0xFFFF) as u32));
+            let r = &*(lparam.0 as *const RECT);
+            let _ = SetWindowPos(
+                hwnd,
+                HWND::default(),
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            let _ = InvalidateRect(hwnd, None, false);
+            LRESULT(0)
+        }
         WM_PAINT => {
             paint(hwnd);
             LRESULT(0)
@@ -497,12 +528,12 @@ unsafe fn paint(hwnd: HWND) {
 
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
-    let cw = client.right;
-    let ch = client.bottom;
+    // Layout width in 96-DPI units (all `rect` coordinates below).
+    let cw = unpx(client.right);
 
-    // Off-screen buffer.
+    // Off-screen buffer, in device pixels.
     let mem = CreateCompatibleDC(hdc);
-    let bmp = CreateCompatibleBitmap(hdc, cw, ch);
+    let bmp = CreateCompatibleBitmap(hdc, client.right, client.bottom);
     let old_bmp = SelectObject(mem, bmp);
 
     // Background.
@@ -532,8 +563,8 @@ unsafe fn paint(hwnd: HWND) {
 
     // ----- Card: INPUT METHOD -----
     {
-        let card = rect(PAD, y, cw - PAD, y + 340);
-        fill_round(mem, card, CARD_RADIUS, CARD_BG);
+        let card = lrect(PAD, y, cw - PAD, y + 340);
+        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
         let ix = card.left + CARD_PAD;
         let ir = card.right - CARD_PAD;
         let mut cy = card.top + CARD_PAD;
@@ -561,24 +592,26 @@ unsafe fn paint(hwnd: HWND) {
         draw_text(mem, "Toggle shortcut", rect(ix, cy, ix + 200, cy + 28), TEXT, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
         let btn_w = 92;
-        let btn = rect(ir - btn_w, cy, ir, cy + 28);
+        let btn = lrect(ir - btn_w, cy, ir, cy + 28);
+        let btn_px = scaled(btn);
         let btn_label = if capturing { "Press keys…" } else { "Change" };
-        fill_round(mem, btn, 8, if capturing { SECTION } else { PILL_OFF });
+        fill_round(mem, btn_px, px(8), if capturing { SECTION } else { PILL_OFF });
         SelectObject(mem, f_value);
         draw_text(
             mem,
             btn_label,
-            btn,
+            btn_px,
             if capturing { WINDOW_BG } else { TEXT },
             DT_CENTER | DT_SINGLELINE | DT_VCENTER,
         );
-        hits.push((Region::HotkeyChange, btn));
+        hits.push((Region::HotkeyChange, btn_px));
 
         // Reset — the only way back from a combination that can't be pressed.
-        let reset = rect(btn.left - 8 - 60, cy, btn.left - 8, cy + 28);
-        fill_round(mem, reset, 8, PILL_OFF);
-        draw_text(mem, "Reset", reset, TEXT2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-        hits.push((Region::HotkeyReset, reset));
+        let reset = lrect(btn.left - 8 - 60, cy, btn.left - 8, cy + 28);
+        let reset_px = scaled(reset);
+        fill_round(mem, reset_px, px(8), PILL_OFF);
+        draw_text(mem, "Reset", reset_px, TEXT2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        hits.push((Region::HotkeyReset, reset_px));
 
         // Current hotkey text, right-aligned before the buttons.
         draw_text(
@@ -673,8 +706,8 @@ unsafe fn paint(hwnd: HWND) {
 
     // ----- Card: GENERAL -----
     {
-        let card = rect(PAD, y, cw - PAD, y + 128);
-        fill_round(mem, card, CARD_RADIUS, CARD_BG);
+        let card = lrect(PAD, y, cw - PAD, y + 128);
+        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
         let ix = card.left + CARD_PAD;
         let ir = card.right - CARD_PAD;
         let mut cy = card.top + CARD_PAD;
@@ -695,8 +728,8 @@ unsafe fn paint(hwnd: HWND) {
 
     // ----- Card: COMPATIBILITY -----
     {
-        let card = rect(PAD, y, cw - PAD, y + 128);
-        fill_round(mem, card, CARD_RADIUS, CARD_BG);
+        let card = lrect(PAD, y, cw - PAD, y + 128);
+        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
         let ix = card.left + CARD_PAD;
         let ir = card.right - CARD_PAD;
         let mut cy = card.top + CARD_PAD;
@@ -717,8 +750,8 @@ unsafe fn paint(hwnd: HWND) {
 
     // ----- Card: ABOUT -----
     {
-        let card = rect(PAD, y, cw - PAD, y + 84);
-        fill_round(mem, card, CARD_RADIUS, CARD_BG);
+        let card = lrect(PAD, y, cw - PAD, y + 84);
+        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
         let ix = card.left + CARD_PAD;
         let ir = card.right - CARD_PAD;
         let mut cy = card.top + CARD_PAD;
@@ -742,7 +775,7 @@ unsafe fn paint(hwnd: HWND) {
     }
 
     // Blit and clean up.
-    let _ = BitBlt(hdc, 0, 0, cw, ch, mem, 0, 0, SRCCOPY);
+    let _ = BitBlt(hdc, 0, 0, client.right, client.bottom, mem, 0, 0, SRCCOPY);
     SelectObject(mem, old_bmp);
     let _ = DeleteObject(bmp);
     let _ = DeleteDC(mem);
@@ -781,7 +814,8 @@ const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF((r as u32) | ((g as u32) << 8) | ((b as u32) << 16))
 }
 
-fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+/// A RECT in 96-DPI layout units (for positioning; scale before drawing).
+fn lrect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
     RECT {
         left,
         top,
@@ -790,11 +824,26 @@ fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
     }
 }
 
+/// A layout-unit RECT converted to device pixels.
+fn scaled(r: RECT) -> RECT {
+    RECT {
+        left: px(r.left),
+        top: px(r.top),
+        right: px(r.right),
+        bottom: px(r.bottom),
+    }
+}
+
+/// A device-pixel RECT from 96-DPI layout coordinates.
+fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+    scaled(lrect(left, top, right, bottom))
+}
+
 unsafe fn font(height: i32, weight: i32) -> HFONT {
     let face = wide("Segoe UI");
     // charset=DEFAULT(1), out/clip precis=0, quality=CLEARTYPE(5), pitch=DEFAULT(0).
     CreateFontW(
-        height,
+        px(height),
         0,
         0,
         0,
@@ -897,18 +946,18 @@ unsafe fn draw_pill(hdc: HDC, r: RECT, label: &str, active: bool, pill_font: HFO
 }
 
 /// Draw a 44×24 switch whose right edge sits at `right_edge`, vertically
-/// centered on `cy`. Returns the switch rect for hit-testing.
+/// centered on `cy` (layout units). Returns the device rect for hit-testing.
 unsafe fn draw_toggle(hdc: HDC, right_edge: i32, cy: i32, on: bool) -> RECT {
     let (w, h) = (44, 24);
     let track = rect(right_edge - w, cy - h / 2, right_edge, cy + h / 2);
     if on {
         fill_gradient_pill(hdc, track);
     } else {
-        fill_round(hdc, track, h, TOGGLE_OFF);
+        fill_round(hdc, track, track.bottom - track.top, TOGGLE_OFF);
     }
 
-    let knob = 18;
-    let m = 3;
+    let knob = px(18);
+    let m = px(3);
     let kx = if on {
         track.right - m - knob
     } else {

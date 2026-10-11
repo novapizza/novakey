@@ -7,14 +7,15 @@
 //! makes Windows silently drop the hook), so it does no I/O or logging.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VK_CAPITAL, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 use novakey_core::{EngineResult, TelexEngine};
@@ -45,6 +46,18 @@ static FIX_AUTOCOMPLETE: AtomicBool = AtomicBool::new(true);
 /// Whether the current foreground app is a web browser (updated on foreground
 /// change so the hot keydown path only reads a cheap atomic).
 static IS_BROWSER: AtomicBool = AtomicBool::new(false);
+/// Timestamp (GetTickCount clock, same as `GetLastInputInfo`) of the last event
+/// either hook saw. The watchdog in main.rs compares it with the system's last
+/// input time to detect a hook Windows silently removed.
+static LAST_HOOK_TIME: AtomicU32 = AtomicU32::new(0);
+
+pub fn last_hook_time() -> u32 {
+    LAST_HOOK_TIME.load(Ordering::Relaxed)
+}
+
+pub fn mark_hook_alive(time: u32) {
+    LAST_HOOK_TIME.store(time, Ordering::Relaxed);
+}
 
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
@@ -108,6 +121,7 @@ pub unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: L
     }
 
     let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+    mark_hook_alive(kb.time);
 
     // Skip our own injected events (equivalent of the macOS source stateID).
     // We intentionally do NOT skip all LLKHF_INJECTED — only our tagged input.
@@ -190,6 +204,7 @@ pub unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: L
 /// don't compose across a click that moved the caret.
 pub unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
+        mark_hook_alive((*(lparam.0 as *const MSLLHOOKSTRUCT)).time);
         // WM_LBUTTONDOWN(0x0201), RBUTTONDOWN(0x0204), MBUTTONDOWN(0x0207)
         let msg = wparam.0 as u32;
         if matches!(msg, 0x0201 | 0x0204 | 0x0207) {

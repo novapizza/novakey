@@ -252,8 +252,12 @@ impl TelexEngine {
 
     /// Whether the buffer currently holds exactly one valid syllable-initial
     /// consonant cluster and no vowels yet — the precondition for Quick
-    /// Vietnamese turning a following `w` into `ư`.
+    /// Vietnamese turning a following `w` into `ư`. "gi" also qualifies: its
+    /// 'i' is part of the initial, so "giw" -> "giư" (giữ, giữa, giường).
     fn is_quick_initial(&self) -> bool {
+        if self.buffer.text().to_lowercase() == "gi" {
+            return true;
+        }
         if self.buffer.vowel_count() != 0 || self.buffer.is_empty() {
             return false;
         }

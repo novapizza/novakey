@@ -137,3 +137,31 @@ fn real_uw_double_w_still_reverts_the_u() {
     // "tuww" -> "tuw". Only the bare-w ư escapes to a lone "w".
     assert_eq!(typ("tuww", true), "tuw");
 }
+
+// --- "gi" counts as an initial: "giw" -> "giư" (giữ, giữa, giường) ---
+
+#[test]
+fn gi_initial_takes_quick_w() {
+    assert_eq!(typ("giw", true), format!("gi{U_HORN}")); // giư
+    assert_eq!(typ("Giw", true), format!("Gi{U_HORN}")); // Giư
+    assert_eq!(typ("giw", false), "giw");
+}
+
+#[test]
+fn gi_quick_w_composes_words() {
+    assert_eq!(typ("giwx", true), "gi\u{1EEF}"); // giữ
+    assert_eq!(typ("giwax", true), "gi\u{1EEF}a"); // giữa
+    assert_eq!(typ("giwowngf", true), "gi\u{01B0}\u{1EDD}ng"); // giường
+    assert_eq!(typ("giwj", true), "gi\u{1EF1}"); // giự
+}
+
+#[test]
+fn gi_quick_w_double_w_escapes() {
+    assert_eq!(typ("giww", true), "giw");
+}
+
+#[test]
+fn toned_gi_does_not_take_quick_w() {
+    // "gis" is already "gí" — a following w is not the gi+ư shortcut.
+    assert_ne!(typ("gisw", true), format!("gí{U_HORN}"));
+}
