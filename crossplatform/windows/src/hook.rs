@@ -43,6 +43,10 @@ static ENABLED: AtomicBool = AtomicBool::new(true);
 static STEP_BY_STEP: AtomicBool = AtomicBool::new(false);
 /// Whether to defeat browser URL-bar autocomplete with the U+202F prefix trick.
 static FIX_AUTOCOMPLETE: AtomicBool = AtomicBool::new(true);
+/// Whether the per-app rules (Settings > Apps) allow composition in the
+/// current foreground app. Separate from `ENABLED` — the user's V/E choice —
+/// so switching apps never changes or persists the language setting.
+static APP_ALLOWED: AtomicBool = AtomicBool::new(true);
 /// Whether the current foreground app is a web browser (updated on foreground
 /// change so the hot keydown path only reads a cheap atomic).
 static IS_BROWSER: AtomicBool = AtomicBool::new(false);
@@ -85,6 +89,15 @@ pub fn set_fix_autocomplete(on: bool) {
 
 pub fn is_fix_autocomplete() -> bool {
     FIX_AUTOCOMPLETE.load(Ordering::Relaxed)
+}
+
+/// Record whether the per-app rules allow composition in the foreground app.
+pub fn set_app_allowed(on: bool) {
+    APP_ALLOWED.store(on, Ordering::Relaxed);
+}
+
+pub fn is_app_allowed() -> bool {
+    APP_ALLOWED.load(Ordering::Relaxed)
 }
 
 /// Record whether the foreground app is a browser (called from the foreground
@@ -147,8 +160,9 @@ pub unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: L
         return CallNextHookEx(None, code, wparam, lparam);
     }
 
-    // Disabled -> behave like a plain keyboard.
-    if !is_enabled() {
+    // Disabled, or paused in this app by the per-app rules -> behave like a
+    // plain keyboard.
+    if !is_enabled() || !is_app_allowed() {
         return CallNextHookEx(None, code, wparam, lparam);
     }
 

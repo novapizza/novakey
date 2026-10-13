@@ -11,6 +11,11 @@
 //! the window's current DPI so it stays crisp at any display zoom (the process
 //! is per-monitor DPI aware, see main.rs).
 //!
+//! The window fits itself to the monitor's work area; when the content is
+//! taller (high display zoom, a long app list) it scrolls with the mouse wheel.
+//! Content is painted at full height into the off-screen bitmap and the visible
+//! slice is blitted, so hit rectangles are kept in content coordinates.
+//!
 //! The window is created on, and its messages pump on, the same thread that
 //! owns `crate::SETTINGS` and the hooks, so it reads/writes shared state without
 //! locking and talks to the main message window via `SendMessageW`.
@@ -19,14 +24,17 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
+    BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
     CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint,
-    FillRect, GetStockObject, GradientFill, InvalidateRect, RoundRect, SelectClipRgn, SelectObject,
-    SetBkMode, SetTextColor, UpdateWindow, DRAW_TEXT_FORMAT, DT_CENTER, DT_LEFT, DT_NOPREFIX,
-    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, GRADIENT_FILL_RECT_H, GRADIENT_RECT, HBITMAP, HBRUSH, HDC,
-    HFONT, HGDIOBJ, HRGN, NULL_PEN, PAINTSTRUCT, SRCCOPY, TRANSPARENT, TRIVERTEX,
+    FillRect, GetMonitorInfoW, GetStockObject, GradientFill, InvalidateRect, MonitorFromWindow,
+    RoundRect, SelectClipRgn, SelectObject, SetBkMode, SetTextColor, UpdateWindow,
+    DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
+    DT_VCENTER, GRADIENT_FILL_RECT_H, GRADIENT_RECT, HBITMAP, HBRUSH, HDC, HFONT, HGDIOBJ, HRGN,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST, NULL_PEN, PAINTSTRUCT, SRCCOPY, TRANSPARENT, TRIVERTEX,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
@@ -34,23 +42,31 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, IsWindow,
-    LoadCursorW, RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow, HMENU,
-    IDC_ARROW, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WM_CLOSE,
-    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_PAINT, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CAPTION, WS_SYSMENU,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    GetClientRect, GetSystemMetrics, GetWindowRect, IsWindow, LoadCursorW, RegisterClassW,
+    SetForegroundWindow, SetWindowPos, ShowWindow, TrackPopupMenu, HMENU, IDC_ARROW, MF_GRAYED,
+    MF_STRING, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, TPM_LEFTALIGN,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEWHEEL, WM_PAINT,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CAPTION, WS_SYSMENU,
 };
 
 use crate::hotkey;
+use crate::settings::{AppMode, Settings};
 use crate::tray::{
-    CMD_AUTOCOMPLETE, CMD_AUTOSTART, CMD_DEFERRED, CMD_PLAYSOUND, CMD_QUICKVN, CMD_STEP,
-    CMD_TOGGLE,
+    CMD_APPS_CHANGED, CMD_AUTOCOMPLETE, CMD_AUTOSTART, CMD_DEFERRED, CMD_PLAYSOUND, CMD_QUICKVN,
+    CMD_STEP, CMD_TOGGLE,
 };
 
 // MARK: - Layout constants (client pixels)
 
 const CLIENT_W: i32 = 460;
-const CLIENT_H: i32 = 786;
+/// Content height without the APPS card, whose height depends on the list.
+const BASE_H: i32 = 786;
+/// Height of one app row in the APPS card.
+const APP_ROW_H: i32 = 32;
+/// Mouse-wheel scroll distance per notch (layout units).
+const WHEEL_STEP: i32 = 48;
 const PAD: i32 = 18;
 const CARD_PAD: i32 = 16;
 const CARD_RADIUS: i32 = 14;
@@ -70,6 +86,12 @@ enum Region {
     ToggleSound,
     ToggleFix,
     ToggleStep,
+    AppModeAll,
+    AppModeOnly,
+    AppModeExcept,
+    /// "Remove" on row `n` of the current app list.
+    AppRemove(usize),
+    AppAdd,
 }
 
 /// How a shortcut-row status line should read.
@@ -90,8 +112,11 @@ struct UiState {
     capturing: bool,
     /// Status line drawn under the toggle-shortcut row.
     notice: Option<(String, NoticeKind)>,
-    /// Clickable rectangles recorded during the last paint.
+    /// Clickable rectangles recorded during the last paint, in content
+    /// coordinates (device pixels from the top of the unscrolled content).
     hits: Vec<(Region, RECT)>,
+    /// How far the content is scrolled up, in device pixels.
+    scroll: i32,
 }
 
 /// Replace the shortcut-row status line.
@@ -170,7 +195,7 @@ pub unsafe fn open(main_hwnd: HWND) {
         0,
         0,
         CLIENT_W,
-        CLIENT_H,
+        BASE_H,
         HWND::default(),
         HMENU::default(),
         hinst,
@@ -187,27 +212,13 @@ pub unsafe fn open(main_hwnd: HWND) {
             capturing: false,
             notice: None,
             hits: Vec::new(),
+            scroll: 0,
         });
     });
 
-    // Size for the monitor's DPI, then center on the primary monitor.
-    let dpi = GetDpiForWindow(hwnd).max(96);
-    DPI.with(|d| d.set(dpi));
-    let mut frame = rect(0, 0, CLIENT_W, CLIENT_H);
-    let _ = AdjustWindowRectExForDpi(&mut frame, style, false, Default::default(), dpi);
-    let win_w = frame.right - frame.left;
-    let win_h = frame.bottom - frame.top;
-    let sw = GetSystemMetrics(SM_CXSCREEN);
-    let sh = GetSystemMetrics(SM_CYSCREEN);
-    let _ = SetWindowPos(
-        hwnd,
-        HWND::default(),
-        (sw - win_w) / 2,
-        ((sh - win_h) / 3).max(0),
-        win_w,
-        win_h,
-        SWP_NOZORDER,
-    );
+    // Size for the monitor's DPI, then center on that monitor.
+    DPI.with(|d| d.set(GetDpiForWindow(hwnd).max(96)));
+    fit_window(hwnd, true);
 
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = UpdateWindow(hwnd);
@@ -217,11 +228,74 @@ pub unsafe fn open(main_hwnd: HWND) {
 /// Repaint the Settings window if it is open (called after a state change made
 /// elsewhere — e.g. the tray/hotkey toggling the language).
 pub unsafe fn refresh() {
-    UI.with(|u| {
-        if let Some(s) = u.borrow().as_ref() {
-            let _ = InvalidateRect(s.hwnd, None, false);
-        }
+    let Some(hwnd) = UI.with(|u| u.borrow().as_ref().map(|s| s.hwnd)) else { return };
+    // The tray may have edited the app list, changing the content height.
+    fit_window(hwnd, false);
+    let _ = InvalidateRect(hwnd, None, false);
+}
+
+/// Total content height in layout units (the window shows as much of it as
+/// fits on the monitor and scrolls the rest).
+fn content_height() -> i32 {
+    let (mode, n) = crate::SETTINGS.with(|s| {
+        let s = s.borrow();
+        (s.app_mode, s.active_app_list().len())
     });
+    BASE_H + apps_card_height(mode, n) + GAP
+}
+
+/// Height of the APPS card for `mode` with `n` listed apps. Must mirror the
+/// layout in `paint`.
+fn apps_card_height(mode: AppMode, n: usize) -> i32 {
+    // Header, mode pills, caption.
+    let mut h = CARD_PAD + 26 + 32 + 10 + 18;
+    if mode != AppMode::All {
+        let rows = if n == 0 { 26 } else { n as i32 * APP_ROW_H };
+        h += 12 + rows + 6 + 28; // gap, rows, gap, "Add app" button
+    }
+    h + CARD_PAD
+}
+
+/// Size the window to its content, capped to the monitor's work area. With
+/// `center`, also center it on that monitor (first open); otherwise keep its
+/// position, nudged up if it would now run off the bottom.
+unsafe fn fit_window(hwnd: HWND, center: bool) {
+    let dpi = DPI.with(|d| d.get());
+    let style = WS_CAPTION | WS_SYSMENU;
+    let mut frame = rect(0, 0, CLIENT_W, content_height());
+    let _ = AdjustWindowRectExForDpi(&mut frame, style, false, Default::default(), dpi);
+    let win_w = frame.right - frame.left;
+
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let work = if GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut mi)
+        .as_bool()
+    {
+        mi.rcWork
+    } else {
+        rect_px(0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
+    };
+    let work_h = work.bottom - work.top;
+    let win_h = (frame.bottom - frame.top).min(work_h);
+
+    let mut cur = RECT::default();
+    let _ = GetWindowRect(hwnd, &mut cur);
+    let (x, mut y) = if center {
+        (
+            work.left + (work.right - work.left - win_w) / 2,
+            work.top + ((work_h - win_h) / 3).max(0),
+        )
+    } else {
+        (cur.left, cur.top)
+    };
+    y = y.min(work.bottom - win_h).max(work.top);
+
+    if (x, y, win_w, win_h) == (cur.left, cur.top, cur.right - cur.left, cur.bottom - cur.top) {
+        return;
+    }
+    let _ = SetWindowPos(hwnd, HWND::default(), x, y, win_w, win_h, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 // MARK: - Window procedure
@@ -248,6 +322,20 @@ unsafe extern "system" fn wnd_proc(
                 r.bottom - r.top,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            // The suggested frame scales the old client height; re-cap it to
+            // the new monitor's work area.
+            fit_window(hwnd, false);
+            let _ = InvalidateRect(hwnd, None, false);
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+            UI.with(|u| {
+                if let Some(s) = u.borrow_mut().as_mut() {
+                    // Upper bound is clamped in `paint`, which knows the sizes.
+                    s.scroll = (s.scroll - delta * px(WHEEL_STEP) / 120).max(0);
+                }
+            });
             let _ = InvalidateRect(hwnd, None, false);
             LRESULT(0)
         }
@@ -301,21 +389,23 @@ unsafe extern "system" fn wnd_proc(
 // MARK: - Interaction
 
 unsafe fn on_click(hwnd: HWND, x: i32, y: i32) {
-    let (main_hwnd, hits) =
+    let (main_hwnd, hits, scroll) =
         UI.with(|u| {
             let b = u.borrow();
             match b.as_ref() {
-                Some(s) => (s.main_hwnd, s.hits.clone()),
-                None => (HWND::default(), Vec::new()),
+                Some(s) => (s.main_hwnd, s.hits.clone(), s.scroll),
+                None => (HWND::default(), Vec::new(), 0),
             }
         });
+    // Hit rectangles are in content coordinates.
+    let y = y + scroll;
 
-    let region = hits
+    let hit = hits
         .iter()
         .find(|(_, r)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
-        .map(|(reg, _)| *reg);
+        .copied();
 
-    let Some(region) = region else { return };
+    let Some((region, hit_rect)) = hit else { return };
 
     match region {
         Region::HotkeyChange => {
@@ -355,9 +445,72 @@ unsafe fn on_click(hwnd: HWND, x: i32, y: i32) {
         Region::ToggleSound => send_cmd(main_hwnd, CMD_PLAYSOUND),
         Region::ToggleFix => send_cmd(main_hwnd, CMD_AUTOCOMPLETE),
         Region::ToggleStep => send_cmd(main_hwnd, CMD_STEP),
+        Region::AppModeAll => edit_apps(hwnd, main_hwnd, |s| s.app_mode = AppMode::All),
+        Region::AppModeOnly => edit_apps(hwnd, main_hwnd, |s| s.app_mode = AppMode::Only),
+        Region::AppModeExcept => edit_apps(hwnd, main_hwnd, |s| s.app_mode = AppMode::Except),
+        Region::AppRemove(i) => edit_apps(hwnd, main_hwnd, |s| s.remove_app_at(i)),
+        Region::AppAdd => {
+            let anchor = POINT {
+                x: hit_rect.left,
+                y: hit_rect.bottom - scroll,
+            };
+            if let Some(exe) = pick_app(hwnd, anchor) {
+                edit_apps(hwnd, main_hwnd, |s| {
+                    s.add_app(&exe);
+                });
+            }
+        }
     }
 
     let _ = InvalidateRect(hwnd, None, false);
+}
+
+/// Apply an edit to the per-app rules: persist it, have the main window
+/// re-evaluate the current app, and resize for the new list length.
+unsafe fn edit_apps(hwnd: HWND, main_hwnd: HWND, edit: impl FnOnce(&mut Settings)) {
+    crate::SETTINGS.with(|s| {
+        let mut s = s.borrow_mut();
+        edit(&mut s);
+        s.save();
+    });
+    send_cmd(main_hwnd, CMD_APPS_CHANGED);
+    fit_window(hwnd, false);
+}
+
+/// Pop up a menu of the apps with an open window (minus those already listed)
+/// below `anchor` (client coordinates). Returns the chosen exe name.
+unsafe fn pick_app(hwnd: HWND, anchor: POINT) -> Option<String> {
+    const FIRST_APP: usize = 100;
+    let listed = crate::SETTINGS.with(|s| s.borrow().active_app_list().to_vec());
+    let apps: Vec<String> = crate::apps::running_apps()
+        .into_iter()
+        .filter(|a| !listed.contains(a))
+        .collect();
+
+    let menu = CreatePopupMenu().ok()?;
+    if apps.is_empty() {
+        let label = wide("No other open apps — open the app first");
+        let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(label.as_ptr()));
+    }
+    for (i, app) in apps.iter().enumerate() {
+        let label = wide(app);
+        let _ = AppendMenuW(menu, MF_STRING, FIRST_APP + i, PCWSTR(label.as_ptr()));
+    }
+
+    let mut pt = anchor;
+    let _ = ClientToScreen(hwnd, &mut pt);
+    let cmd = TrackPopupMenu(
+        menu,
+        TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN,
+        pt.x,
+        pt.y,
+        0,
+        hwnd,
+        None,
+    )
+    .0 as usize;
+    let _ = DestroyMenu(menu);
+    apps.get(cmd.checked_sub(FIRST_APP)?).cloned()
 }
 
 /// Reuse the main window's existing WM_COMMAND handlers so all state mutation
@@ -514,11 +667,15 @@ unsafe fn paint(hwnd: HWND) {
             s.hotkey_vk,
         )
     });
-    let (capturing, notice) = UI.with(|u| {
+    let (app_mode, app_list) = crate::SETTINGS.with(|s| {
+        let s = s.borrow();
+        (s.app_mode, s.active_app_list().to_vec())
+    });
+    let (capturing, notice, scroll) = UI.with(|u| {
         let b = u.borrow();
         match b.as_ref() {
-            Some(s) => (s.capturing, s.notice.clone()),
-            None => (false, None),
+            Some(s) => (s.capturing, s.notice.clone(), s.scroll),
+            None => (false, None, 0),
         }
     });
     let hotkey_text = hotkey::describe(mods, vk);
@@ -531,13 +688,17 @@ unsafe fn paint(hwnd: HWND) {
     // Layout width in 96-DPI units (all `rect` coordinates below).
     let cw = unpx(client.right);
 
-    // Off-screen buffer, in device pixels.
+    // Off-screen buffer holding the whole content, in device pixels; the
+    // visible slice is blitted at the end.
+    let content_px = px(content_height()).max(client.bottom);
+    let max_scroll = content_px - client.bottom;
+    let scroll = scroll.clamp(0, max_scroll);
     let mem = CreateCompatibleDC(hdc);
-    let bmp = CreateCompatibleBitmap(hdc, client.right, client.bottom);
+    let bmp = CreateCompatibleBitmap(hdc, client.right, content_px);
     let old_bmp = SelectObject(mem, bmp);
 
     // Background.
-    fill_solid(mem, client, WINDOW_BG);
+    fill_solid(mem, rect_px(0, 0, client.right, content_px), WINDOW_BG);
 
     // Fonts.
     let f_title = font(-19, 600);
@@ -726,6 +887,83 @@ unsafe fn paint(hwnd: HWND) {
         y = card.bottom + GAP;
     }
 
+    // ----- Card: APPS (per-app rules) -----
+    {
+        let card = lrect(PAD, y, cw - PAD, y + apps_card_height(app_mode, app_list.len()));
+        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
+        let ix = card.left + CARD_PAD;
+        let ir = card.right - CARD_PAD;
+        let mut cy = card.top + CARD_PAD;
+
+        SelectObject(mem, f_section);
+        draw_text(mem, "APPS", rect(ix, cy, ir, cy + 16), SECTION, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        cy += 26;
+
+        // Mode pills.
+        let gap = 8;
+        let pill_w = (ir - ix - 2 * gap) / 3;
+        let modes = [
+            ("All apps", AppMode::All, Region::AppModeAll),
+            ("Only these", AppMode::Only, Region::AppModeOnly),
+            ("All except", AppMode::Except, Region::AppModeExcept),
+        ];
+        for (i, (label, mode, region)) in modes.into_iter().enumerate() {
+            let left = ix + i as i32 * (pill_w + gap);
+            let r = rect(left, cy, left + pill_w, cy + 32);
+            draw_pill(mem, r, label, app_mode == mode, f_value);
+            hits.push((region, r));
+        }
+        cy += 32 + 10;
+
+        SelectObject(mem, f_small);
+        let caption = match app_mode {
+            AppMode::All => "Vietnamese typing works in every app.",
+            AppMode::Only => "Vietnamese typing only in the apps below.",
+            AppMode::Except => "Vietnamese typing everywhere except the apps below.",
+        };
+        draw_text(mem, caption, rect(ix, cy, ir, cy + 18), TEXT2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        cy += 18;
+
+        if app_mode != AppMode::All {
+            cy += 12;
+            if app_list.is_empty() {
+                draw_text(
+                    mem,
+                    "No apps yet — add one below, or from the tray menu.",
+                    rect(ix, cy, ir, cy + 26),
+                    TEXT2,
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+                );
+                cy += 26;
+            } else {
+                for (i, app) in app_list.iter().enumerate() {
+                    SelectObject(mem, f_row);
+                    draw_text(
+                        mem,
+                        app,
+                        rect(ix, cy, ir - 90, cy + 28),
+                        TEXT,
+                        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                    );
+                    let remove = rect(ir - 76, cy + 2, ir, cy + 26);
+                    fill_round(mem, remove, px(8), PILL_OFF);
+                    SelectObject(mem, f_small);
+                    draw_text(mem, "Remove", remove, TEXT2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+                    hits.push((Region::AppRemove(i), remove));
+                    cy += APP_ROW_H;
+                }
+            }
+            cy += 6;
+            let add = rect(ix, cy, ix + 120, cy + 28);
+            fill_round(mem, add, px(8), PILL_OFF);
+            SelectObject(mem, f_value);
+            draw_text(mem, "+  Add app", add, TEXT, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+            hits.push((Region::AppAdd, add));
+        }
+
+        y = card.bottom + GAP;
+    }
+
     // ----- Card: COMPATIBILITY -----
     {
         let card = lrect(PAD, y, cw - PAD, y + 128);
@@ -774,8 +1012,17 @@ unsafe fn paint(hwnd: HWND) {
         );
     }
 
-    // Blit and clean up.
-    let _ = BitBlt(hdc, 0, 0, client.right, client.bottom, mem, 0, 0, SRCCOPY);
+    // Scroll indicator, drawn into the visible slice of the content.
+    if max_scroll > 0 {
+        let view = client.bottom;
+        let thumb_h = (view * view / content_px).max(px(32));
+        let thumb_top = scroll + (view - thumb_h) * scroll / max_scroll;
+        let thumb = rect_px(client.right - px(7), thumb_top + px(4), client.right - px(3), thumb_top + thumb_h - px(4));
+        fill_round(mem, thumb, px(4), TOGGLE_OFF);
+    }
+
+    // Blit the visible slice and clean up.
+    let _ = BitBlt(hdc, 0, 0, client.right, client.bottom, mem, 0, scroll, SRCCOPY);
     SelectObject(mem, old_bmp);
     let _ = DeleteObject(bmp);
     let _ = DeleteDC(mem);
@@ -784,10 +1031,11 @@ unsafe fn paint(hwnd: HWND) {
     }
     let _ = EndPaint(hwnd, &ps);
 
-    // Record hit rectangles for the next click.
+    // Record hit rectangles (and the clamped scroll) for the next click.
     UI.with(|u| {
         if let Some(s) = u.borrow_mut().as_mut() {
             s.hits = hits;
+            s.scroll = scroll;
         }
     });
 }
@@ -832,6 +1080,11 @@ fn scaled(r: RECT) -> RECT {
         right: px(r.right),
         bottom: px(r.bottom),
     }
+}
+
+/// A RECT already in device pixels (no scaling).
+fn rect_px(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+    lrect(left, top, right, bottom)
 }
 
 /// A device-pixel RECT from 96-DPI layout coordinates.

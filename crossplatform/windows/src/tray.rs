@@ -38,6 +38,10 @@ pub const CMD_PLAYSOUND: usize = 7;
 pub const CMD_QUICKVN: usize = 8;
 pub const CMD_DEFERRED: usize = 9;
 pub const CMD_UPDATE: usize = 10;
+/// Turn Vietnamese on/off in the app that was in front before the menu opened.
+pub const CMD_APP_TOGGLE: usize = 11;
+/// The Settings window edited the per-app rules; re-evaluate the current app.
+pub const CMD_APPS_CHANGED: usize = 12;
 
 const TRAY_UID: u32 = 1;
 
@@ -117,20 +121,31 @@ fn set_tip(data: &mut NOTIFYICONDATAW, tip: &str) {
     }
 }
 
+/// What the tray shows: the effective language and, when the per-app rules
+/// pause NovaKey in the current app, which app that is.
+pub struct TrayState<'a> {
+    /// Vietnamese composition is actually active right now.
+    pub vietnamese: bool,
+    /// The toggle hotkey description, for the tooltip.
+    pub hotkey: &'a str,
+    /// Set when Vietnamese is on but paused in this app by the per-app rules.
+    pub paused_in: Option<&'a str>,
+}
+
 /// Add the tray icon. Returns false if the shell refused it — typically at
 /// sign-in, when NovaKey starts before the taskbar's notification area exists.
-pub fn add(hwnd: HWND, enabled: bool, hotkey: &str) -> bool {
-    let (mut data, owned) = base_data(hwnd, enabled);
-    set_tip(&mut data, &tip_for(enabled, hotkey));
+pub fn add(hwnd: HWND, state: &TrayState) -> bool {
+    let (mut data, owned) = base_data(hwnd, state.vietnamese);
+    set_tip(&mut data, &tip_for(state));
     let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &data).as_bool() };
     retire_previous_badge(owned);
     ok
 }
 
 /// Update the tooltip and icon to reflect the current on/off state and hotkey.
-pub fn update(hwnd: HWND, enabled: bool, hotkey: &str) {
-    let (mut data, owned) = base_data(hwnd, enabled);
-    set_tip(&mut data, &tip_for(enabled, hotkey));
+pub fn update(hwnd: HWND, state: &TrayState) {
+    let (mut data, owned) = base_data(hwnd, state.vietnamese);
+    set_tip(&mut data, &tip_for(state));
     unsafe {
         let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
     }
@@ -151,13 +166,25 @@ pub fn remove(hwnd: HWND) {
     retire_previous_badge(0);
 }
 
-fn tip_for(enabled: bool, hotkey: &str) -> String {
-    let state = if enabled { "ON" } else { "OFF" };
-    format!("NovaKey — Vietnamese {state} ({hotkey})")
+fn tip_for(state: &TrayState) -> String {
+    let hotkey = state.hotkey;
+    if let Some(app) = state.paused_in {
+        return format!("NovaKey — paused in {app} ({hotkey})");
+    }
+    let on = if state.vietnamese { "ON" } else { "OFF" };
+    format!("NovaKey — Vietnamese {on} ({hotkey})")
 }
 
 /// Show the right-click context menu. Selecting an item posts WM_COMMAND to hwnd.
-pub fn show_menu(hwnd: HWND, enabled: bool, autostart: bool, step: bool, fix_autocomplete: bool) {
+/// `app` is the app the user was in and whether Vietnamese is allowed there.
+pub fn show_menu(
+    hwnd: HWND,
+    enabled: bool,
+    app: Option<(&str, bool)>,
+    autostart: bool,
+    step: bool,
+    fix_autocomplete: bool,
+) {
     unsafe {
         let menu: HMENU = match CreatePopupMenu() {
             Ok(m) => m,
@@ -167,6 +194,10 @@ pub fn show_menu(hwnd: HWND, enabled: bool, autostart: bool, step: bool, fix_aut
         let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
 
         let _ = AppendMenuW(menu, MF_STRING | check(enabled), CMD_TOGGLE, w("Vietnamese input"));
+        if let Some((name, allowed)) = app {
+            let label = format!("Vietnamese in {name}");
+            let _ = AppendMenuW(menu, MF_STRING | check(allowed), CMD_APP_TOGGLE, w(&label));
+        }
         let _ = AppendMenuW(menu, MF_STRING, CMD_SETTINGS, w("Settings…"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING | check(autostart), CMD_AUTOSTART, w("Start with Windows"));

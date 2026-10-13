@@ -48,6 +48,16 @@ tray icon or press **Ctrl+Shift+Z** to toggle Vietnamese input on/off;
 right-click for the menu (toggle, Start with Windows, compatibility mode, quit).
 Settings persist to `%APPDATA%\NovaKey\settings.json`.
 
+### Per-app rules
+
+Settings > **Apps** limits where Vietnamese typing runs: **All apps** (default),
+**Only these** apps, or **All except** these. Apps are matched by exe name
+(`zalo.exe`); add one from the list of open apps, or right-click the tray icon
+in any app and toggle **Vietnamese in <app>**. Where NovaKey is paused the tray
+badge shows **E** and the tooltip says so; your V/E choice is kept unchanged
+for the other apps. Every Chrome window and installed web app shares
+`chrome.exe`, so they can't be told apart.
+
 ## Typing styles (ươ / uw-first)
 
 The engine composes `ươ` from any of these, so both common Telex habits work:
