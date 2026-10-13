@@ -32,6 +32,7 @@ features = [
     "Win32_System_SystemInformation",
     "Win32_System_Diagnostics_Debug",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
     "Win32_Networking_WinHttp",
     "Win32_Security_Cryptography",
     "Win32_Security_WinTrust",

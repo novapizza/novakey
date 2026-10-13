@@ -11,7 +11,41 @@ use crate::hotkey;
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "NovaKey";
 
-#[derive(Clone, Copy, Debug)]
+/// Which apps NovaKey composes Vietnamese in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AppMode {
+    /// Every app (the default).
+    All,
+    /// Only the apps in `apps_only`.
+    Only,
+    /// Every app except those in `apps_except`.
+    Except,
+}
+
+impl AppMode {
+    fn to_u32(self) -> u32 {
+        match self {
+            AppMode::All => 0,
+            AppMode::Only => 1,
+            AppMode::Except => 2,
+        }
+    }
+
+    fn from_u32(v: u32) -> Option<AppMode> {
+        match v {
+            0 => Some(AppMode::All),
+            1 => Some(AppMode::Only),
+            2 => Some(AppMode::Except),
+            _ => None,
+        }
+    }
+}
+
+/// Separator between exe names in the stored app lists. `|` cannot appear in
+/// a Windows file name, so no escaping is needed.
+const APP_SEP: char = '|';
+
+#[derive(Clone, Debug)]
 pub struct Settings {
     /// Whether Vietnamese mode is currently on.
     pub enabled: bool,
@@ -34,6 +68,14 @@ pub struct Settings {
     pub hotkey_vk: u32,
     /// Unix timestamp (seconds) of the last background update check.
     pub last_update_check: u64,
+    /// Which apps Vietnamese composition is active in.
+    pub app_mode: AppMode,
+    /// Exe names (normalized, see `normalize_exe`) for `AppMode::Only`.
+    pub apps_only: Vec<String>,
+    /// Exe names (normalized, see `normalize_exe`) for `AppMode::Except`.
+    /// Kept apart from `apps_only` so switching modes never reinterprets an
+    /// allow-list as a block-list or vice versa.
+    pub apps_except: Vec<String>,
 }
 
 impl Default for Settings {
@@ -49,6 +91,9 @@ impl Default for Settings {
             hotkey_mods: hotkey::DEFAULT_MODS,
             hotkey_vk: hotkey::DEFAULT_VK,
             last_update_check: 0,
+            app_mode: AppMode::All,
+            apps_only: Vec::new(),
+            apps_except: Vec::new(),
         }
     }
 }
@@ -82,6 +127,15 @@ impl Settings {
                 s.hotkey_vk = read_u32(&text, "hotkeyVk").unwrap_or(s.hotkey_vk);
                 s.last_update_check =
                     read_u64(&text, "lastUpdateCheck").unwrap_or(s.last_update_check);
+                s.app_mode = read_u32(&text, "appMode")
+                    .and_then(AppMode::from_u32)
+                    .unwrap_or(s.app_mode);
+                s.apps_only = read_str(&text, "appsOnly")
+                    .map(|v| parse_app_list(&v))
+                    .unwrap_or_default();
+                s.apps_except = read_str(&text, "appsExcept")
+                    .map(|v| parse_app_list(&v))
+                    .unwrap_or_default();
             }
         }
         s.sanitize();
@@ -104,7 +158,7 @@ impl Settings {
                 let _ = fs::create_dir_all(dir);
             }
             let json = format!(
-                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {},\n  \"playSound\": {},\n  \"quickVietnamese\": {},\n  \"deferredDiacritics\": {},\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {},\n  \"lastUpdateCheck\": {}\n}}\n",
+                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {},\n  \"playSound\": {},\n  \"quickVietnamese\": {},\n  \"deferredDiacritics\": {},\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {},\n  \"lastUpdateCheck\": {},\n  \"appMode\": {},\n  \"appsOnly\": \"{}\",\n  \"appsExcept\": \"{}\"\n}}\n",
                 self.enabled,
                 self.step_by_step,
                 self.start_with_windows,
@@ -114,11 +168,124 @@ impl Settings {
                 self.deferred_diacritics,
                 self.hotkey_mods,
                 self.hotkey_vk,
-                self.last_update_check
+                self.last_update_check,
+                self.app_mode.to_u32(),
+                join_app_list(&self.apps_only),
+                join_app_list(&self.apps_except)
             );
             let _ = fs::write(&path, json);
         }
     }
+}
+
+// MARK: - Per-app rules
+
+impl Settings {
+    /// The list the current mode consults (empty slice for `AppMode::All`).
+    pub fn active_app_list(&self) -> &[String] {
+        match self.app_mode {
+            AppMode::All => &[],
+            AppMode::Only => &self.apps_only,
+            AppMode::Except => &self.apps_except,
+        }
+    }
+
+    /// Whether Vietnamese composition should run in the app `exe` (a
+    /// normalized exe name; `None` when the foreground process could not be
+    /// identified, e.g. an elevated window).
+    pub fn allows_app(&self, exe: Option<&str>) -> bool {
+        let listed = |list: &[String]| exe.is_some_and(|e| list.iter().any(|a| a == e));
+        match self.app_mode {
+            AppMode::All => true,
+            AppMode::Only => listed(&self.apps_only),
+            AppMode::Except => !listed(&self.apps_except),
+        }
+    }
+
+    /// The current mode's list, for editing (`None` in `AppMode::All`).
+    fn active_app_list_mut(&mut self) -> Option<&mut Vec<String>> {
+        match self.app_mode {
+            AppMode::All => None,
+            AppMode::Only => Some(&mut self.apps_only),
+            AppMode::Except => Some(&mut self.apps_except),
+        }
+    }
+
+    /// Add `exe` to the current mode's list. Returns false if the name is not
+    /// a valid exe name, the list is full, or it is already listed.
+    pub fn add_app(&mut self, exe: &str) -> bool {
+        let Some(exe) = normalize_exe(exe) else { return false };
+        let Some(list) = self.active_app_list_mut() else { return false };
+        if list.len() >= MAX_APPS || list.contains(&exe) {
+            return false;
+        }
+        list.push(exe);
+        list.sort();
+        true
+    }
+
+    /// Remove the entry at `index` of the current mode's list.
+    pub fn remove_app_at(&mut self, index: usize) {
+        if let Some(list) = self.active_app_list_mut() {
+            if index < list.len() {
+                list.remove(index);
+            }
+        }
+    }
+
+    /// Turn Vietnamese composition on (`on`) or off in `exe`, editing whichever
+    /// list the current mode uses. From "All apps", turning one app off switches
+    /// to "All except" with that app listed — the only way to honour the request.
+    pub fn set_app_enabled(&mut self, exe: &str, on: bool) {
+        let Some(exe) = normalize_exe(exe) else { return };
+        if self.allows_app(Some(&exe)) == on {
+            return;
+        }
+        if self.app_mode == AppMode::All {
+            self.app_mode = AppMode::Except;
+        }
+        // Only-mode lists the apps that are on; Except-mode the ones that are off.
+        if (self.app_mode == AppMode::Only) == on {
+            self.add_app(&exe);
+        } else if let Some(list) = self.active_app_list_mut() {
+            list.retain(|a| *a != exe);
+        }
+    }
+}
+
+/// Upper bound on each app list, so a hand-edited settings file cannot make
+/// the Settings window (one row per app) unboundedly tall.
+pub const MAX_APPS: usize = 64;
+
+/// Canonical form of an app identifier: the lowercase file name of an `.exe`
+/// (a full path is reduced to its last component). Rejects anything that is
+/// not a plausible Windows exe name — including the characters our flat JSON
+/// and `APP_SEP` rely on never appearing (`"`, `|`, control characters).
+pub fn normalize_exe(name: &str) -> Option<String> {
+    let base = name.trim().rsplit(['\\', '/']).next()?.trim().to_lowercase();
+    let valid = base.len() > 4
+        && base.len() <= 255
+        && base.ends_with(".exe")
+        && !base
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '"' | '|' | ':' | '*' | '?' | '<' | '>'));
+    valid.then_some(base)
+}
+
+/// Parse a stored `a.exe|b.exe` list, dropping invalid and duplicate entries.
+fn parse_app_list(text: &str) -> Vec<String> {
+    let mut apps: Vec<String> = text.split(APP_SEP).filter_map(normalize_exe).collect();
+    apps.sort();
+    apps.dedup();
+    apps.truncate(MAX_APPS);
+    apps
+}
+
+fn join_app_list(apps: &[String]) -> String {
+    apps.iter()
+        .filter_map(|a| normalize_exe(a))
+        .collect::<Vec<_>>()
+        .join(&APP_SEP.to_string())
 }
 
 /// Extremely small `"key": true/false` extractor for our flat JSON.
@@ -392,6 +559,111 @@ mod tests {
         s.sanitize();
         assert_eq!(s.hotkey_mods, hotkey::MOD_CONTROL | hotkey::MOD_ALT);
         assert_eq!(s.hotkey_vk, 0x56);
+    }
+
+    #[test]
+    fn normalizes_exe_names() {
+        assert_eq!(normalize_exe("Zalo.exe"), Some("zalo.exe".into()));
+        assert_eq!(
+            normalize_exe(r"C:\Program Files\Slack\slack.EXE"),
+            Some("slack.exe".into())
+        );
+        assert_eq!(normalize_exe("  code.exe "), Some("code.exe".into()));
+        for bad in ["", ".exe", "notepad", "a\"b.exe", "a|b.exe", "a\nb.exe", "enabled"] {
+            assert_eq!(normalize_exe(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn parses_app_lists() {
+        let list = parse_app_list("zalo.exe|Slack.exe||bogus|zalo.exe");
+        assert_eq!(list, vec!["slack.exe".to_string(), "zalo.exe".to_string()]);
+        assert!(parse_app_list("").is_empty());
+    }
+
+    #[test]
+    fn round_trips_app_rules_through_flat_json() {
+        let s = Settings {
+            app_mode: AppMode::Except,
+            apps_only: vec!["zalo.exe".into()],
+            apps_except: vec!["code.exe".into(), "windowsterminal.exe".into()],
+            ..Settings::default()
+        };
+        let json = format!(
+            "{{\n  \"enabled\": true,\n  \"appMode\": {},\n  \"appsOnly\": \"{}\",\n  \"appsExcept\": \"{}\"\n}}",
+            s.app_mode.to_u32(),
+            join_app_list(&s.apps_only),
+            join_app_list(&s.apps_except)
+        );
+        assert_eq!(read_u32(&json, "appMode").and_then(AppMode::from_u32), Some(AppMode::Except));
+        assert_eq!(parse_app_list(&read_str(&json, "appsOnly").unwrap()), s.apps_only);
+        assert_eq!(parse_app_list(&read_str(&json, "appsExcept").unwrap()), s.apps_except);
+        // App names never shadow a settings key.
+        assert_eq!(read_bool(&json, "enabled"), Some(true));
+        assert_eq!(read_str("{ \"appsOnly\": \"\" }", "appsOnly"), Some(String::new()));
+    }
+
+    #[test]
+    fn app_modes_decide_who_is_allowed() {
+        let mut s = Settings {
+            apps_only: vec!["zalo.exe".into()],
+            apps_except: vec!["code.exe".into()],
+            ..Settings::default()
+        };
+        assert!(s.allows_app(Some("code.exe")));
+        assert!(s.allows_app(None));
+
+        s.app_mode = AppMode::Only;
+        assert!(s.allows_app(Some("zalo.exe")));
+        assert!(!s.allows_app(Some("code.exe")));
+        assert!(!s.allows_app(None));
+
+        s.app_mode = AppMode::Except;
+        assert!(s.allows_app(Some("zalo.exe")));
+        assert!(!s.allows_app(Some("code.exe")));
+        assert!(s.allows_app(None));
+    }
+
+    #[test]
+    fn set_app_enabled_edits_the_right_list() {
+        let mut s = Settings::default();
+        // All -> turning one app off switches to Except.
+        s.set_app_enabled("Code.exe", false);
+        assert_eq!(s.app_mode, AppMode::Except);
+        assert_eq!(s.apps_except, vec!["code.exe".to_string()]);
+        assert!(!s.allows_app(Some("code.exe")));
+        s.set_app_enabled("code.exe", true);
+        assert!(s.apps_except.is_empty());
+
+        s.app_mode = AppMode::Only;
+        s.set_app_enabled("zalo.exe", true);
+        assert_eq!(s.apps_only, vec!["zalo.exe".to_string()]);
+        s.set_app_enabled("zalo.exe", true); // no duplicate
+        assert_eq!(s.apps_only.len(), 1);
+        s.set_app_enabled("zalo.exe", false);
+        assert!(s.apps_only.is_empty());
+        // The Except list was left alone throughout Only-mode edits.
+        assert!(s.apps_except.is_empty());
+    }
+
+    #[test]
+    fn add_and_remove_apps() {
+        let mut s = Settings::default();
+        assert!(!s.add_app("zalo.exe"), "All mode has no list to add to");
+        s.app_mode = AppMode::Only;
+        assert!(s.add_app("zalo.exe"));
+        assert!(!s.add_app("ZALO.EXE"), "duplicate");
+        assert!(!s.add_app("not-an-exe"));
+        assert!(s.add_app("slack.exe"));
+        assert_eq!(s.active_app_list(), ["slack.exe".to_string(), "zalo.exe".to_string()]);
+        s.remove_app_at(0);
+        assert_eq!(s.active_app_list(), ["zalo.exe".to_string()]);
+        s.remove_app_at(5); // out of range: no-op
+        assert_eq!(s.active_app_list().len(), 1);
+        for i in 0..MAX_APPS {
+            s.add_app(&format!("app{i}.exe"));
+        }
+        assert_eq!(s.apps_only.len(), MAX_APPS);
     }
 
     #[test]

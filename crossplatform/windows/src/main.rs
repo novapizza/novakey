@@ -8,6 +8,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod apps;
 mod badge;
 mod hook;
 mod hotkey;
@@ -20,7 +21,6 @@ mod vk;
 
 use std::cell::{Cell, RefCell};
 
-use windows::core::PWSTR;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
@@ -29,10 +29,9 @@ use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, OpenProcess, ProcessPowerThrottling,
-    QueryFullProcessImageNameW, SetPriorityClass, SetProcessInformation,
-    ABOVE_NORMAL_PRIORITY_CLASS, PROCESS_NAME_WIN32, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
-    PROCESS_POWER_THROTTLING_STATE, PROCESS_QUERY_LIMITED_INFORMATION,
+    CreateMutexW, GetCurrentProcess, ProcessPowerThrottling, SetPriorityClass,
+    SetProcessInformation, ABOVE_NORMAL_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+    PROCESS_POWER_THROTTLING_STATE,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::HiDpi::{
@@ -44,7 +43,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetMessageW, GetWindowThreadProcessId, KillTimer, MessageBoxW, PostMessageW,
+    GetMessageW, KillTimer, MessageBoxW, PostMessageW,
     PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetProcessDPIAware, SetTimer,
     SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND, HHOOK,
     HMENU, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MSG, WH_KEYBOARD_LL, WH_MOUSE_LL,
@@ -86,6 +85,16 @@ thread_local! {
 
     /// The message window, so the keyboard hook can ask for a toggle.
     static MAIN_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+
+    /// The app the user is typing in (normalized exe name), for the per-app
+    /// rules. Only updated for real apps — not for NovaKey's own windows or the
+    /// taskbar — so opening the tray menu still knows which app it is about.
+    static CURRENT_APP: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// The app the user is typing in, if it could be identified.
+pub(crate) fn current_app() -> Option<String> {
+    CURRENT_APP.with(|a| a.borrow().clone())
 }
 
 /// Whether the toggle hotkey is live. Same thread as the message pump.
@@ -172,12 +181,12 @@ unsafe fn run() {
 
     // Load persisted settings and apply them.
     let loaded = settings::Settings::load();
-    SETTINGS.with(|s| *s.borrow_mut() = loaded);
     hook::set_enabled(loaded.enabled);
     hook::set_step_by_step(loaded.step_by_step);
     hook::set_fix_autocomplete(loaded.fix_browser_autocomplete);
     hook::set_quick_vietnamese(loaded.quick_vietnamese);
     hook::set_deferred_diacritics(loaded.deferred_diacritics);
+    SETTINGS.with(|s| *s.borrow_mut() = loaded);
     sync_autostart();
 
     // Low-level hook callbacks must answer within LowLevelHooksTimeout or
@@ -270,9 +279,13 @@ unsafe fn run() {
         });
     }
 
+    // Seed the browser flag and per-app rules from the currently-focused
+    // window, before the tray icon is drawn so it shows the right state.
+    on_foreground(GetForegroundWindow());
+
     // Tray icon. At sign-in the notification area may not exist yet; keep
     // retrying until it does (TaskbarCreated also covers this when it fires).
-    if !tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc()) {
+    if !tray_add(hwnd) {
         SetTimer(hwnd, TIMER_TRAY_RETRY, TRAY_RETRY_MS, None);
     }
 
@@ -292,9 +305,6 @@ unsafe fn run() {
             spawn_update_check(hwnd, /*background=*/ true);
         }
     }
-
-    // Seed the browser flag from the currently-focused window.
-    hook::set_is_browser(window_is_browser(GetForegroundWindow()));
 
     // Standard message pump. GetMessageW returns 0 on WM_QUIT.
     let mut msg = MSG::default();
@@ -381,55 +391,68 @@ unsafe extern "system" fn winevent_proc(
     _time: u32,
 ) {
     hook::reset_engine();
-    // Cache whether the new foreground app is a browser, so the hot keydown
-    // path only reads an atomic instead of querying the process each keystroke.
-    hook::set_is_browser(window_is_browser(hwnd));
+    on_foreground(hwnd);
 }
 
-/// Whether the process owning `hwnd` is a known web browser. Used to scope the
-/// autocomplete-defeating U+202F trick to browsers (it can misbehave in
-/// terminals). Cheap: no COM, no cross-process messaging.
-unsafe fn window_is_browser(hwnd: HWND) -> bool {
-    if hwnd.is_invalid() {
-        return false;
+/// Cache what the hot keydown path needs to know about the new foreground
+/// window — is it a browser, do the per-app rules allow composing in it — so
+/// it only reads atomics instead of querying the process on each keystroke.
+unsafe fn on_foreground(hwnd: HWND) {
+    let app = apps::window_app(hwnd);
+    hook::set_is_browser(app.as_deref().is_some_and(apps::is_browser));
+    // NovaKey's own windows and the taskbar (clicked on the way to the tray
+    // menu) keep the previous app's rules in force.
+    if apps::is_transient_window(hwnd) {
+        return;
     }
-    let mut pid: u32 = 0;
-    GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    if pid == 0 {
-        return false;
+    CURRENT_APP.with(|a| *a.borrow_mut() = app);
+    apply_app_rules();
+}
+
+/// Re-evaluate the per-app rules for the current app and reflect a change in
+/// the tray. Called on app switch and whenever the rules are edited.
+unsafe fn apply_app_rules() {
+    let app = current_app();
+    let allowed = SETTINGS.with(|s| s.borrow().allows_app(app.as_deref()));
+    let was_allowed = hook::is_app_allowed();
+    hook::set_app_allowed(allowed);
+    // The tooltip names the paused app, so a switch between two paused apps
+    // also needs a refresh; between two allowed apps nothing changes.
+    if allowed != was_allowed || !allowed {
+        let hwnd = MAIN_HWND.with(|h| h.get());
+        if hwnd != 0 {
+            tray_update(HWND(hwnd as *mut _));
+        }
     }
-    let handle = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
-        Ok(h) => h,
-        Err(_) => return false,
+}
+
+/// Publish the current state to the tray icon (`add` on first publish or
+/// after Explorer restarts). Returns whether the shell accepted it.
+unsafe fn publish_tray(hwnd: HWND, add: bool) -> bool {
+    let enabled = hook::is_enabled();
+    let allowed = hook::is_app_allowed();
+    let app = current_app();
+    let hotkey = current_hotkey_desc();
+    let paused_in = (enabled && !allowed).then(|| app.as_deref().unwrap_or("this app"));
+    let state = tray::TrayState {
+        vietnamese: enabled && allowed,
+        hotkey: &hotkey,
+        paused_in,
     };
-    let mut buf = [0u16; 260];
-    let mut len = buf.len() as u32;
-    let ok = QueryFullProcessImageNameW(
-        handle,
-        PROCESS_NAME_WIN32,
-        PWSTR(buf.as_mut_ptr()),
-        &mut len,
-    )
-    .is_ok();
-    let _ = CloseHandle(handle);
-    if !ok {
-        return false;
+    if add {
+        tray::add(hwnd, &state)
+    } else {
+        tray::update(hwnd, &state);
+        true
     }
-    let path = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
-    let base = path.rsplit(['\\', '/']).next().unwrap_or(&path);
-    matches!(
-        base,
-        "chrome.exe"
-            | "msedge.exe"
-            | "firefox.exe"
-            | "brave.exe"
-            | "opera.exe"
-            | "opera_gx.exe"
-            | "vivaldi.exe"
-            | "chromium.exe"
-            | "arc.exe"
-            | "iexplore.exe"
-    )
+}
+
+unsafe fn tray_add(hwnd: HWND) -> bool {
+    publish_tray(hwnd, true)
+}
+
+unsafe fn tray_update(hwnd: HWND) {
+    publish_tray(hwnd, false);
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -447,9 +470,12 @@ unsafe extern "system" fn wnd_proc(
             } else if mouse == WM_RBUTTONUP {
                 let (autostart, step) =
                     SETTINGS.with(|s| (s.borrow().start_with_windows, s.borrow().step_by_step));
+                let app = current_app();
+                let app_item = app.as_deref().map(|a| (a, hook::is_app_allowed()));
                 tray::show_menu(
                     hwnd,
                     hook::is_enabled(),
+                    app_item,
                     autostart,
                     step,
                     hook::is_fix_autocomplete(),
@@ -460,7 +486,7 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             match wparam.0 {
                 TIMER_TRAY_RETRY => {
-                    if tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc()) {
+                    if tray_add(hwnd) {
                         let _ = KillTimer(hwnd, TIMER_TRAY_RETRY);
                     }
                 }
@@ -489,7 +515,7 @@ unsafe extern "system" fn wnd_proc(
         // Light/dark switch or a DPI change alters how the badge should be
         // drawn (letter colour, icon size), so redraw it.
         WM_SETTINGCHANGE | WM_THEMECHANGED | WM_DPICHANGED => {
-            tray::update(hwnd, hook::is_enabled(), &current_hotkey_desc());
+            tray_update(hwnd);
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_DESTROY => {
@@ -500,7 +526,7 @@ unsafe extern "system" fn wnd_proc(
         _ => {
             // Explorer restarted and dropped every tray icon: publish ours again.
             if msg != 0 && msg == taskbar_created_msg() {
-                if tray::add(hwnd, hook::is_enabled(), &current_hotkey_desc()) {
+                if tray_add(hwnd) {
                     let _ = KillTimer(hwnd, TIMER_TRAY_RETRY);
                 }
                 return LRESULT(0);
@@ -581,7 +607,7 @@ unsafe fn do_toggle(hwnd: HWND) {
         s.save();
         s.play_sound
     });
-    tray::update(hwnd, new, &current_hotkey_desc());
+    tray_update(hwnd);
     if play {
         let _ = MessageBeep(MB_OK);
     }
@@ -649,7 +675,7 @@ unsafe fn set_toggle_hotkey(hwnd: HWND, mods: u32, vk: u32) -> bool {
             s.hotkey_vk = vk;
             s.save();
         });
-        tray::update(hwnd, hook::is_enabled(), &hotkey::describe(mods, vk));
+        tray_update(hwnd);
         true
     } else {
         let _ = register_toggle_hotkey(hwnd, old_mods, old_vk);
@@ -717,6 +743,19 @@ unsafe fn handle_command(hwnd: HWND, cmd: usize) {
             });
             hook::set_fix_autocomplete(new);
         }
+        tray::CMD_APP_TOGGLE => {
+            if let Some(app) = current_app() {
+                SETTINGS.with(|s| {
+                    let mut s = s.borrow_mut();
+                    let on = !s.allows_app(Some(&app));
+                    s.set_app_enabled(&app, on);
+                    s.save();
+                });
+                apply_app_rules();
+                ui::refresh();
+            }
+        }
+        tray::CMD_APPS_CHANGED => apply_app_rules(),
         tray::CMD_UPDATE => spawn_update_check(hwnd, /*background=*/ false),
         tray::CMD_QUIT => {
             let _ = DestroyWindow(hwnd);
