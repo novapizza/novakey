@@ -1,10 +1,13 @@
 //! ui.rs
-//! An owner-drawn, dark card-based Settings window that mirrors the macOS
-//! SwiftUI preferences pane (INPUT METHOD / GENERAL / COMPATIBILITY / ABOUT).
+//! An owner-drawn Settings window in the classic Windows 9x style: a beveled
+//! gray frame with a gradient title bar, etched group boxes, 3D push buttons,
+//! checkboxes and a sunken status bar (INPUT METHOD / APP SCOPE / GENERAL /
+//! COMPATIBILITY, mirroring the macOS preferences pane).
 //!
-//! Everything is drawn by hand with GDI into an off-screen bitmap (flicker-free
-//! double buffering); interactive elements (V/E pills, toggles, the Change
-//! button) are hit-tested manually against rectangles recorded during paint.
+//! Everything — including the title bar and frame — is drawn by hand with GDI
+//! into off-screen bitmaps (flicker-free double buffering); interactive
+//! elements are hit-tested manually against rectangles recorded during paint.
+//! Buttons press in on mouse-down and act on release, as classic controls do.
 //! No GUI dependency is added — this keeps the binary tiny.
 //!
 //! Layout is authored in 96-DPI units; `rect`, `font` and `px` scale it to
@@ -12,9 +15,10 @@
 //! is per-monitor DPI aware, see main.rs).
 //!
 //! The window fits itself to the monitor's work area; when the content is
-//! taller (high display zoom, a long app list) it scrolls with the mouse wheel.
-//! Content is painted at full height into the off-screen bitmap and the visible
-//! slice is blitted, so hit rectangles are kept in content coordinates.
+//! taller (high display zoom, a long app list) the area between the title bar
+//! and the status bar scrolls with the mouse wheel or the scroll bar. Content
+//! is painted at full height into its own bitmap and the visible slice is
+//! blitted into the frame.
 //!
 //! The window is created on, and its messages pump on, the same thread that
 //! owns `crate::SETTINGS` and the hooks, so it reads/writes shared state without
@@ -25,30 +29,36 @@ use std::ffi::c_void;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
-    COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
-    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint,
-    FillRect, GetMonitorInfoW, GetStockObject, GradientFill, InvalidateRect, MonitorFromWindow,
-    RoundRect, SelectClipRgn, SelectObject, SetBkMode, SetTextColor, UpdateWindow,
-    DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, GRADIENT_FILL_RECT_H, GRADIENT_RECT, HBITMAP, HBRUSH, HDC, HFONT, HGDIOBJ, HRGN,
-    MONITORINFO, MONITOR_DEFAULTTONEAREST, NULL_PEN, PAINTSTRUCT, SRCCOPY, TRANSPARENT, TRIVERTEX,
+    CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
+    GetMonitorInfoW, GetTextExtentPoint32W, GradientFill, InvalidateRect, MonitorFromWindow,
+    Polyline, ScreenToClient, SelectObject, SetBkMode, SetTextColor, UpdateWindow,
+    DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
+    GRADIENT_FILL_RECT_H, GRADIENT_FILL_RECT_V, GRADIENT_RECT, HBRUSH, HDC, HFONT, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT, TRIVERTEX,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RETURN,
+    VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    GetClientRect, GetSystemMetrics, GetWindowRect, IsWindow, LoadCursorW, RegisterClassW,
-    SetForegroundWindow, SetWindowPos, ShowWindow, TrackPopupMenu, HMENU, IDC_ARROW, MF_GRAYED,
-    MF_STRING, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, TPM_LEFTALIGN,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEWHEEL, WM_PAINT,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CAPTION, WS_SYSMENU,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
+    DestroyWindow, DrawIconEx, GetClientRect, GetSystemMetrics, GetWindowRect, IsWindow,
+    LoadCursorW, LoadImageW, RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow,
+    TrackPopupMenu, DI_NORMAL, HICON, HMENU, HTCAPTION, IDC_ARROW, IMAGE_ICON, LR_DEFAULTCOLOR,
+    MF_GRAYED, MF_STRING, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_MINIMIZE,
+    SW_SHOW, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN, WINDOW_STYLE, WM_ACTIVATE,
+    WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
+    WM_PAINT, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
 };
 
 use crate::hotkey;
@@ -58,19 +68,47 @@ use crate::tray::{
     CMD_STEP, CMD_TOGGLE,
 };
 
-// MARK: - Layout constants (client pixels)
+// MARK: - Layout constants (96-DPI layout units)
 
 const CLIENT_W: i32 = 460;
-/// Content height without the APPS card, whose height depends on the list.
-const BASE_H: i32 = 786;
-/// Height of one app row in the APPS card.
-const APP_ROW_H: i32 = 32;
+/// No native caption or border: the frame and title bar are painted.
+const SETTINGS_STYLE: WINDOW_STYLE = WINDOW_STYLE(WS_POPUP.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0);
+/// Outer frame: a 2-unit raised bevel plus 2 units of face color.
+const FRAME: i32 = 4;
+const TITLE_H: i32 = 24;
+/// Status bar height, including the gap above it.
+const STATUS_H: i32 = 28;
+/// Top edge of the scrolling content viewport.
+const VIEW_TOP: i32 = FRAME + TITLE_H + 2;
+/// Fixed chrome above and below the viewport.
+const CHROME_H: i32 = VIEW_TOP + STATUS_H + FRAME;
+const SCROLLBAR_W: i32 = 16;
 /// Mouse-wheel scroll distance per notch (layout units).
 const WHEEL_STEP: i32 = 48;
-const PAD: i32 = 18;
-const CARD_PAD: i32 = 16;
-const CARD_RADIUS: i32 = 14;
-const GAP: i32 = 14;
+/// Scroll distance of one scroll-bar arrow click (layout units).
+const ARROW_STEP: i32 = 24;
+
+/// Content side margin, and the gap between group boxes.
+const MARGIN: i32 = 10;
+const GROUP_GAP: i32 = 12;
+/// Group label row down to the first control inside the group.
+const GROUP_HEAD: i32 = 24;
+/// Inner side and bottom padding of a group box.
+const GROUP_PAD: i32 = 12;
+/// Height of one row in the app list box.
+const APP_ROW_H: i32 = 30;
+/// Row height of a checkbox without a caption line.
+const CHECK_ROW_H: i32 = 24;
+/// Row height of a checkbox with a caption line.
+const CAPTIONED_ROW_H: i32 = 38;
+
+/// The INPUT METHOD group: language buttons (52), shortcut panel (48), status
+/// line (24), input mode (36), separator (12), two captioned options (46 + 38).
+const INPUT_GROUP_H: i32 = GROUP_HEAD + 52 + 48 + 24 + 36 + 12 + 46 + CAPTIONED_ROW_H + GROUP_PAD;
+/// GENERAL and COMPATIBILITY: two plain checkbox rows each.
+const TWO_ROW_GROUP_H: i32 = GROUP_HEAD + CHECK_ROW_H + 8 + CHECK_ROW_H + GROUP_PAD;
+/// Etched separator plus the OK button row.
+const FOOTER_H: i32 = 12 + 30 + 10;
 
 // MARK: - Interactive regions
 
@@ -92,6 +130,14 @@ enum Region {
     /// "Remove" on row `n` of the current app list.
     AppRemove(usize),
     AppAdd,
+    Ok,
+    Minimize,
+    Close,
+    ScrollUp,
+    ScrollDown,
+    PageUp,
+    PageDown,
+    ScrollThumb,
 }
 
 /// How a shortcut-row status line should read.
@@ -105,6 +151,16 @@ enum NoticeKind {
     Error,
 }
 
+/// Scroll-bar geometry from the last paint (device pixels).
+#[derive(Clone, Copy, Default)]
+struct ScrollGeom {
+    /// Distance the thumb can travel along the track.
+    travel: i32,
+    max_scroll: i32,
+    /// One page of scrolling (a track click).
+    page: i32,
+}
+
 struct UiState {
     hwnd: HWND,
     main_hwnd: HWND,
@@ -112,11 +168,20 @@ struct UiState {
     capturing: bool,
     /// Status line drawn under the toggle-shortcut row.
     notice: Option<(String, NoticeKind)>,
-    /// Clickable rectangles recorded during the last paint, in content
-    /// coordinates (device pixels from the top of the unscrolled content).
+    /// Clickable rectangles recorded during the last paint, in client
+    /// coordinates (content regions already offset by the scroll position).
     hits: Vec<(Region, RECT)>,
     /// How far the content is scrolled up, in device pixels.
     scroll: i32,
+    /// Whether the window is the active one (title bar color).
+    active: bool,
+    /// The control held down by the mouse, and whether the cursor is still
+    /// over it (it is drawn pressed only then, and acts on release only then).
+    down: Option<Region>,
+    down_over: bool,
+    /// Scroll-thumb drag in progress: (cursor y, scroll) when it started.
+    drag: Option<(i32, i32)>,
+    scroll_geom: ScrollGeom,
 }
 
 /// Replace the shortcut-row status line.
@@ -155,6 +220,11 @@ fn unpx(v: i32) -> i32 {
     (v as f64 * 96.0 / dpi).round() as i32
 }
 
+/// Width of one bevel line in device pixels.
+fn line() -> i32 {
+    px(1).max(1)
+}
+
 // MARK: - Public entry points (called from main.rs)
 
 /// Open the Settings window, or bring the existing one to the front.
@@ -185,17 +255,16 @@ pub unsafe fn open(main_hwnd: HWND) {
     // Ignore ERROR_CLASS_ALREADY_EXISTS on subsequent opens.
     RegisterClassW(&wc);
 
-    let style = WS_CAPTION | WS_SYSMENU;
     let title = wide("NovaKey Settings");
     let hwnd = match CreateWindowExW(
         Default::default(),
         PCWSTR(class_name.as_ptr()),
         PCWSTR(title.as_ptr()),
-        style,
+        SETTINGS_STYLE,
         0,
         0,
         CLIENT_W,
-        BASE_H,
+        CHROME_H,
         HWND::default(),
         HMENU::default(),
         hinst,
@@ -213,8 +282,23 @@ pub unsafe fn open(main_hwnd: HWND) {
             notice: None,
             hits: Vec::new(),
             scroll: 0,
+            active: true,
+            down: None,
+            down_over: false,
+            drag: None,
+            scroll_geom: ScrollGeom::default(),
         });
     });
+
+    // Square corners: Windows 11 would otherwise round the top-level window.
+    // Fails harmlessly on Windows 10, which never rounds.
+    let pref = DWMWCP_DONOTROUND;
+    let _ = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_WINDOW_CORNER_PREFERENCE,
+        &pref as *const _ as *const c_void,
+        std::mem::size_of_val(&pref) as u32,
+    );
 
     // Size for the monitor's DPI, then center on that monitor.
     DPI.with(|d| d.set(GetDpiForWindow(hwnd).max(96)));
@@ -234,37 +318,48 @@ pub unsafe fn refresh() {
     let _ = InvalidateRect(hwnd, None, false);
 }
 
-/// Total content height in layout units (the window shows as much of it as
-/// fits on the monitor and scrolls the rest).
+/// Total scrolling content height in layout units (the window shows as much
+/// of it as fits on the monitor and scrolls the rest). Must mirror `paint`.
 fn content_height() -> i32 {
     let (mode, n) = crate::SETTINGS.with(|s| {
         let s = s.borrow();
         (s.app_mode, s.active_app_list().len())
     });
-    BASE_H + apps_card_height(mode, n) + GAP
+    MARGIN
+        + INPUT_GROUP_H
+        + GROUP_GAP
+        + scope_group_height(mode, n)
+        + GROUP_GAP
+        + TWO_ROW_GROUP_H
+        + GROUP_GAP
+        + TWO_ROW_GROUP_H
+        + GROUP_GAP
+        + FOOTER_H
 }
 
-/// Height of the APPS card for `mode` with `n` listed apps. Must mirror the
-/// layout in `paint`.
-fn apps_card_height(mode: AppMode, n: usize) -> i32 {
-    // Header, mode pills, caption.
-    let mut h = CARD_PAD + 26 + 32 + 10 + 18;
+/// Height of the app list box holding `n` apps (an empty list keeps one row
+/// for its hint).
+fn app_list_height(n: usize) -> i32 {
+    4 + n.max(1) as i32 * APP_ROW_H
+}
+
+/// Height of the APP SCOPE group for `mode` with `n` listed apps. Must mirror
+/// the layout in `paint_content`.
+fn scope_group_height(mode: AppMode, n: usize) -> i32 {
+    // Mode buttons, caption field.
+    let mut h = GROUP_HEAD + 32 + 10 + 26;
     if mode != AppMode::All {
-        let rows = if n == 0 { 26 } else { n as i32 * APP_ROW_H };
-        h += 12 + rows + 6 + 28; // gap, rows, gap, "Add app" button
+        h += 10 + app_list_height(n) + 8 + 28; // gap, list, gap, "Add App…" button
     }
-    h + CARD_PAD
+    h + GROUP_PAD
 }
 
 /// Size the window to its content, capped to the monitor's work area. With
 /// `center`, also center it on that monitor (first open); otherwise keep its
 /// position, nudged up if it would now run off the bottom.
 unsafe fn fit_window(hwnd: HWND, center: bool) {
-    let dpi = DPI.with(|d| d.get());
-    let style = WS_CAPTION | WS_SYSMENU;
-    let mut frame = rect(0, 0, CLIENT_W, content_height());
-    let _ = AdjustWindowRectExForDpi(&mut frame, style, false, Default::default(), dpi);
-    let win_w = frame.right - frame.left;
+    // No non-client area: the window rect is the client rect.
+    let win_w = px(CLIENT_W);
 
     let mut mi = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -278,7 +373,7 @@ unsafe fn fit_window(hwnd: HWND, center: bool) {
         rect_px(0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
     };
     let work_h = work.bottom - work.top;
-    let win_h = (frame.bottom - frame.top).min(work_h);
+    let win_h = px(CHROME_H + content_height()).min(work_h);
 
     let mut cur = RECT::default();
     let _ = GetWindowRect(hwnd, &mut cur);
@@ -308,6 +403,33 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_ERASEBKGND => LRESULT(1), // fully repainted in WM_PAINT
+        WM_NCHITTEST => {
+            // The painted title bar drags the window like a real caption,
+            // except over its buttons.
+            let mut pt = POINT {
+                x: (lparam.0 & 0xFFFF) as i16 as i32,
+                y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+            };
+            let _ = ScreenToClient(hwnd, &mut pt);
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            if contains(&title_bar(client.right), pt)
+                && !title_buttons(client.right).iter().any(|r| contains(r, pt))
+            {
+                return LRESULT(HTCAPTION as isize);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_ACTIVATE => {
+            let active = (wparam.0 & 0xFFFF) != 0; // not WA_INACTIVE
+            UI.with(|u| {
+                if let Some(s) = u.borrow_mut().as_mut() {
+                    s.active = active;
+                }
+            });
+            let _ = InvalidateRect(hwnd, None, false);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_DPICHANGED => {
             // Moved to a monitor with a different zoom (or zoom changed):
             // adopt the new DPI and the frame Windows suggests for it.
@@ -330,13 +452,7 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_MOUSEWHEEL => {
             let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
-            UI.with(|u| {
-                if let Some(s) = u.borrow_mut().as_mut() {
-                    // Upper bound is clamped in `paint`, which knows the sizes.
-                    s.scroll = (s.scroll - delta * px(WHEEL_STEP) / 120).max(0);
-                }
-            });
-            let _ = InvalidateRect(hwnd, None, false);
+            scroll_by(hwnd, -delta * px(WHEEL_STEP) / 120);
             LRESULT(0)
         }
         WM_PAINT => {
@@ -344,14 +460,41 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
-            let x = (lparam.0 & 0xFFFF) as i16 as i32;
-            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-            on_click(hwnd, x, y);
+            let (x, y) = mouse_pos(lparam);
+            on_mouse_down(hwnd, x, y);
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            let (x, y) = mouse_pos(lparam);
+            on_mouse_move(hwnd, x, y);
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let (x, y) = mouse_pos(lparam);
+            on_mouse_up(hwnd, x, y);
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            // Mouse capture lost (released, or taken by another window):
+            // whatever was held is no longer pressed.
+            UI.with(|u| {
+                if let Some(s) = u.borrow_mut().as_mut() {
+                    s.down = None;
+                    s.drag = None;
+                }
+            });
+            let _ = InvalidateRect(hwnd, None, false);
             LRESULT(0)
         }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             if on_key(hwnd, wparam.0 as u32) {
                 return LRESULT(0); // consumed during capture
+            }
+            // Dialog conventions: Enter is OK, Esc closes.
+            let vk = wparam.0 as u16;
+            if msg == WM_KEYDOWN && (vk == VK_RETURN.0 || vk == VK_ESCAPE.0) {
+                let _ = DestroyWindow(hwnd);
+                return LRESULT(0);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
@@ -386,28 +529,121 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
+fn mouse_pos(lparam: LPARAM) -> (i32, i32) {
+    (
+        (lparam.0 & 0xFFFF) as i16 as i32,
+        ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+    )
+}
+
+fn contains(r: &RECT, p: POINT) -> bool {
+    p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom
+}
+
 // MARK: - Interaction
 
-unsafe fn on_click(hwnd: HWND, x: i32, y: i32) {
-    let (main_hwnd, hits, scroll) =
-        UI.with(|u| {
-            let b = u.borrow();
-            match b.as_ref() {
-                Some(s) => (s.main_hwnd, s.hits.clone(), s.scroll),
-                None => (HWND::default(), Vec::new(), 0),
-            }
-        });
-    // Hit rectangles are in content coordinates.
-    let y = y + scroll;
+/// The region under client point (x, y), from the last paint.
+fn hit_at(x: i32, y: i32) -> Option<(Region, RECT)> {
+    UI.with(|u| {
+        let b = u.borrow();
+        let s = b.as_ref()?;
+        s.hits.iter().find(|(_, r)| contains(r, POINT { x, y })).copied()
+    })
+}
 
-    let hit = hits
-        .iter()
-        .find(|(_, r)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
-        .copied();
+/// Scroll the content by `delta` device pixels (clamped in `paint`).
+unsafe fn scroll_by(hwnd: HWND, delta: i32) {
+    UI.with(|u| {
+        if let Some(s) = u.borrow_mut().as_mut() {
+            s.scroll = (s.scroll + delta).clamp(0, s.scroll_geom.max_scroll.max(0));
+        }
+    });
+    let _ = InvalidateRect(hwnd, None, false);
+}
 
-    let Some((region, hit_rect)) = hit else { return };
+unsafe fn on_mouse_down(hwnd: HWND, x: i32, y: i32) {
+    let Some((region, _)) = hit_at(x, y) else { return };
+    let geom = UI.with(|u| u.borrow().as_ref().map(|s| s.scroll_geom).unwrap_or_default());
+    match region {
+        // Scroll-bar parts act at once, like the real control.
+        Region::ScrollUp => scroll_by(hwnd, -px(ARROW_STEP)),
+        Region::ScrollDown => scroll_by(hwnd, px(ARROW_STEP)),
+        Region::PageUp => scroll_by(hwnd, -geom.page),
+        Region::PageDown => scroll_by(hwnd, geom.page),
+        Region::ScrollThumb => {
+            UI.with(|u| {
+                if let Some(s) = u.borrow_mut().as_mut() {
+                    s.drag = Some((y, s.scroll));
+                }
+            });
+            SetCapture(hwnd);
+        }
+        // Everything else presses in now and acts on release.
+        _ => {
+            UI.with(|u| {
+                if let Some(s) = u.borrow_mut().as_mut() {
+                    s.down = Some(region);
+                    s.down_over = true;
+                }
+            });
+            SetCapture(hwnd);
+            let _ = InvalidateRect(hwnd, None, false);
+        }
+    }
+}
+
+unsafe fn on_mouse_move(hwnd: HWND, x: i32, y: i32) {
+    let over = hit_at(x, y).map(|(r, _)| r);
+    let changed = UI.with(|u| {
+        let mut b = u.borrow_mut();
+        let Some(s) = b.as_mut() else { return false };
+        if let Some((start_y, start_scroll)) = s.drag {
+            let g = s.scroll_geom;
+            s.scroll = start_scroll + (y - start_y) * g.max_scroll / g.travel.max(1);
+            s.scroll = s.scroll.clamp(0, g.max_scroll.max(0));
+            return true;
+        }
+        let Some(down) = s.down else { return false };
+        let now_over = over == Some(down);
+        let changed = now_over != s.down_over;
+        s.down_over = now_over;
+        changed
+    });
+    if changed {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+unsafe fn on_mouse_up(hwnd: HWND, x: i32, y: i32) {
+    let down = UI.with(|u| {
+        let mut b = u.borrow_mut();
+        let s = b.as_mut()?;
+        s.drag = None;
+        s.down.take()
+    });
+    let _ = ReleaseCapture();
+    let _ = InvalidateRect(hwnd, None, false);
+
+    // Act only if released over the control that was pressed.
+    let Some(down) = down else { return };
+    let Some((region, hit_rect)) = hit_at(x, y) else { return };
+    if region == down {
+        activate(hwnd, region, hit_rect);
+    }
+}
+
+unsafe fn activate(hwnd: HWND, region: Region, hit_rect: RECT) {
+    let main_hwnd = UI.with(|u| u.borrow().as_ref().map(|s| s.main_hwnd).unwrap_or_default());
 
     match region {
+        Region::Ok | Region::Close => {
+            let _ = DestroyWindow(hwnd);
+            return;
+        }
+        Region::Minimize => {
+            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+            return;
+        }
         Region::HotkeyChange => {
             set_capturing(true);
             set_notice(None);
@@ -452,7 +688,7 @@ unsafe fn on_click(hwnd: HWND, x: i32, y: i32) {
         Region::AppAdd => {
             let anchor = POINT {
                 x: hit_rect.left,
-                y: hit_rect.bottom - scroll,
+                y: hit_rect.bottom,
             };
             if let Some(exe) = pick_app(hwnd, anchor) {
                 edit_apps(hwnd, main_hwnd, |s| {
@@ -460,6 +696,12 @@ unsafe fn on_click(hwnd: HWND, x: i32, y: i32) {
                 });
             }
         }
+        // Handled on mouse-down.
+        Region::ScrollUp
+        | Region::ScrollDown
+        | Region::PageUp
+        | Region::PageDown
+        | Region::ScrollThumb => {}
     }
 
     let _ = InvalidateRect(hwnd, None, false);
@@ -651,142 +893,268 @@ unsafe fn key_down(vk: u16) -> bool {
 
 // MARK: - Painting
 
+/// Everything `paint` renders, snapshotted up front.
+struct View {
+    enabled: bool,
+    fix: bool,
+    autostart: bool,
+    step: bool,
+    sound: bool,
+    quick_vn: bool,
+    deferred: bool,
+    hotkey_text: String,
+    hotkey_bound: bool,
+    app_mode: AppMode,
+    app_list: Vec<String>,
+    capturing: bool,
+    notice: Option<(String, NoticeKind)>,
+    active: bool,
+    /// The control currently drawn pressed.
+    down: Option<Region>,
+}
+
+impl View {
+    fn is_down(&self, r: Region) -> bool {
+        self.down == Some(r)
+    }
+}
+
+struct Fonts {
+    title: HFONT,
+    group: HFONT,
+    body: HFONT,
+    bold: HFONT,
+    small: HFONT,
+    italic: HFONT,
+    lang: HFONT,
+    badge: HFONT,
+    mono: HFONT,
+    status: HFONT,
+    status_bold: HFONT,
+    /// Marlett: the system font that holds the classic caption-button and
+    /// scroll-arrow glyphs.
+    glyph: HFONT,
+}
+
+impl Fonts {
+    unsafe fn new() -> Self {
+        Fonts {
+            title: font("Tahoma", -14, 700, false),
+            group: font("Tahoma", -14, 700, false),
+            body: font("Tahoma", -14, 400, false),
+            bold: font("Tahoma", -14, 700, false),
+            small: font("Tahoma", -12, 400, false),
+            italic: font("Tahoma", -13, 400, true),
+            lang: font("Tahoma", -16, 700, false),
+            badge: font("Tahoma", -13, 700, false),
+            mono: font("Courier New", -15, 700, false),
+            status: font("Courier New", -13, 400, false),
+            status_bold: font("Courier New", -14, 700, false),
+            glyph: marlett(-11),
+        }
+    }
+
+    unsafe fn delete(&self) {
+        for f in [
+            self.title,
+            self.group,
+            self.body,
+            self.bold,
+            self.small,
+            self.italic,
+            self.lang,
+            self.badge,
+            self.mono,
+            self.status,
+            self.status_bold,
+            self.glyph,
+        ] {
+            let _ = DeleteObject(f);
+        }
+    }
+}
+
 unsafe fn paint(hwnd: HWND) {
     // Snapshot the state we render.
-    let enabled = crate::hook::is_enabled();
-    let fix = crate::hook::is_fix_autocomplete();
-    let (autostart, step, sound, quick_vn, deferred, mods, vk) = crate::SETTINGS.with(|s| {
-        let s = s.borrow();
-        (
-            s.start_with_windows,
-            s.step_by_step,
-            s.play_sound,
-            s.quick_vietnamese,
-            s.deferred_diacritics,
-            s.hotkey_mods,
-            s.hotkey_vk,
-        )
-    });
-    let (app_mode, app_list) = crate::SETTINGS.with(|s| {
-        let s = s.borrow();
-        (s.app_mode, s.active_app_list().to_vec())
-    });
-    let (capturing, notice, scroll) = UI.with(|u| {
+    let (autostart, step, sound, quick_vn, deferred, mods, vk, app_mode, app_list) =
+        crate::SETTINGS.with(|s| {
+            let s = s.borrow();
+            (
+                s.start_with_windows,
+                s.step_by_step,
+                s.play_sound,
+                s.quick_vietnamese,
+                s.deferred_diacritics,
+                s.hotkey_mods,
+                s.hotkey_vk,
+                s.app_mode,
+                s.active_app_list().to_vec(),
+            )
+        });
+    let (capturing, notice, scroll, active, down) = UI.with(|u| {
         let b = u.borrow();
         match b.as_ref() {
-            Some(s) => (s.capturing, s.notice.clone(), s.scroll),
-            None => (false, None, 0),
+            Some(s) => (
+                s.capturing,
+                s.notice.clone(),
+                s.scroll,
+                s.active,
+                s.down.filter(|_| s.down_over),
+            ),
+            None => (false, None, 0, true, None),
         }
     });
-    let hotkey_text = hotkey::describe(mods, vk);
+    let v = View {
+        enabled: crate::hook::is_enabled(),
+        fix: crate::hook::is_fix_autocomplete(),
+        autostart,
+        step,
+        sound,
+        quick_vn,
+        deferred,
+        // No key name contains '+', so this only spaces out the separators.
+        hotkey_text: hotkey::describe(mods, vk).replace('+', " + "),
+        hotkey_bound: crate::hotkey_bound(),
+        app_mode,
+        app_list,
+        capturing,
+        notice,
+        active,
+        down,
+    };
 
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
 
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
-    // Layout width in 96-DPI units (all `rect` coordinates below).
-    let cw = unpx(client.right);
+    let (cw, ch) = (client.right, client.bottom);
 
-    // Off-screen buffer holding the whole content, in device pixels; the
-    // visible slice is blitted at the end.
-    let content_px = px(content_height()).max(client.bottom);
-    let max_scroll = content_px - client.bottom;
+    // Viewport between the title bar and the status bar (device pixels).
+    let view_top = px(VIEW_TOP);
+    let view_bottom = (ch - px(STATUS_H + FRAME)).max(view_top);
+    let view_h = view_bottom - view_top;
+    let content_px = px(content_height());
+    let max_scroll = (content_px - view_h).max(0);
     let scroll = scroll.clamp(0, max_scroll);
-    let mem = CreateCompatibleDC(hdc);
-    let bmp = CreateCompatibleBitmap(hdc, client.right, content_px);
-    let old_bmp = SelectObject(mem, bmp);
+    let has_bar = max_scroll > 0;
+    let view_left = px(FRAME);
+    let view_right = cw - px(FRAME) - if has_bar { px(SCROLLBAR_W) } else { 0 };
+    let view = rect_px(view_left, view_top, view_right, view_bottom);
 
-    // Background.
-    fill_solid(mem, rect_px(0, 0, client.right, content_px), WINDOW_BG);
+    let fonts = Fonts::new();
 
-    // Fonts.
-    let f_title = font(-19, 600);
-    let f_section = font(-12, 700);
-    let f_row = font(-16, 400);
-    let f_pill = font(-15, 700);
-    let f_value = font(-14, 600);
-    let f_small = font(-13, 400);
+    // Content, painted at full height into its own bitmap.
+    let cdc = CreateCompatibleDC(hdc);
+    let cbmp = CreateCompatibleBitmap(hdc, (view_right - view_left).max(1), content_px.max(1));
+    let old_cbmp = SelectObject(cdc, cbmp);
+    fill_solid(cdc, rect_px(0, 0, view_right - view_left, content_px), FACE);
+    let mut content_hits = Vec::new();
+    paint_content(cdc, unpx(view_right - view_left), &v, &fonts, &mut content_hits);
 
-    let mut hits: Vec<(Region, RECT)> = Vec::new();
-    let mut y = 12;
+    // The frame: chrome plus the visible slice of the content.
+    let fdc = CreateCompatibleDC(hdc);
+    let fbmp = CreateCompatibleBitmap(hdc, cw, ch);
+    let old_fbmp = SelectObject(fdc, fbmp);
+    fill_solid(fdc, client, FACE);
+    let _ = BitBlt(fdc, view_left, view_top, view.right - view.left, view_h, cdc, 0, scroll, SRCCOPY);
 
-    // Title.
-    SelectObject(mem, f_title);
-    draw_text(
-        mem,
-        "NovaKey Settings",
-        rect(PAD, y, cw - PAD, y + 24),
-        TEXT,
-        DT_CENTER | DT_SINGLELINE | DT_VCENTER,
-    );
-    y += 34;
+    // Content hits move into client coordinates, clipped to the viewport.
+    let mut hits: Vec<(Region, RECT)> = content_hits
+        .into_iter()
+        .filter_map(|(region, r)| {
+            let r = rect_px(
+                r.left + view_left,
+                r.top + view_top - scroll,
+                r.right + view_left,
+                r.bottom + view_top - scroll,
+            );
+            let clipped = rect_px(
+                r.left.max(view.left),
+                r.top.max(view.top),
+                r.right.min(view.right),
+                r.bottom.min(view.bottom),
+            );
+            (clipped.top < clipped.bottom).then_some((region, clipped))
+        })
+        .collect();
 
-    // ----- Card: INPUT METHOD -----
+    let geom = paint_chrome(fdc, cw, ch, &v, &fonts, &mut hits, (view, content_px, scroll));
+
+    let _ = BitBlt(hdc, 0, 0, cw, ch, fdc, 0, 0, SRCCOPY);
+
+    SelectObject(cdc, old_cbmp);
+    let _ = DeleteObject(cbmp);
+    let _ = DeleteDC(cdc);
+    SelectObject(fdc, old_fbmp);
+    let _ = DeleteObject(fbmp);
+    let _ = DeleteDC(fdc);
+    fonts.delete();
+    let _ = EndPaint(hwnd, &ps);
+
+    // Record hit rectangles (and the clamped scroll) for the next click.
+    UI.with(|u| {
+        if let Some(s) = u.borrow_mut().as_mut() {
+            s.hits = hits;
+            s.scroll = scroll;
+            s.scroll_geom = geom;
+        }
+    });
+}
+
+/// Paint the scrolling content: the four group boxes and the OK button.
+/// `cw` is the content width in layout units; hit rects are recorded in
+/// content-bitmap device pixels.
+unsafe fn paint_content(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(Region, RECT)>) {
+    let gl = MARGIN;
+    let gr = cw - MARGIN;
+    let ix = gl + GROUP_PAD;
+    let ir = gr - GROUP_PAD;
+    let mut y = MARGIN;
+
+    // ----- Group: Input Method Selection -----
     {
-        let card = lrect(PAD, y, cw - PAD, y + 340);
-        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
-        let ix = card.left + CARD_PAD;
-        let ir = card.right - CARD_PAD;
-        let mut cy = card.top + CARD_PAD;
+        group_box(hdc, lrect(gl, y, gr, y + INPUT_GROUP_H), "Input Method Selection", f.group);
+        let mut cy = y + GROUP_HEAD;
 
-        SelectObject(mem, f_section);
-        draw_text(mem, "INPUT METHOD", rect(ix, cy, ir, cy + 16), SECTION, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        cy += 28;
-
-        // V / E pills.
-        let pill_h = 38;
-        let vi = rect(ix, cy, ix + 130, cy + pill_h);
-        let en = rect(ix + 140, cy, ix + 140 + 110, cy + pill_h);
-        draw_pill(mem, vi, "V   Tiếng Việt", enabled, f_pill);
-        draw_pill(mem, en, "E   English", !enabled, f_pill);
+        // V / E language buttons.
+        let half = (ir - ix - 10) / 2;
+        let vi = rect(ix, cy, ix + half, cy + 40);
+        let en = rect(ir - half, cy, ir, cy + 40);
+        lang_button(hdc, vi, "V", "Tiếng Việt", v.enabled, v.is_down(Region::PillVi), f);
+        lang_button(hdc, en, "E", "English", !v.enabled, v.is_down(Region::PillEn), f);
         hits.push((Region::PillVi, vi));
         hits.push((Region::PillEn, en));
-        cy += pill_h + 14;
+        cy += 52;
 
-        // Divider.
-        fill_solid(mem, rect(ix, cy, ir, cy + 1), DIVIDER);
-        cy += 14;
+        // Toggle-shortcut panel: label · current value · [Reset] [Change…].
+        let panel = rect(ix, cy, ir, cy + 44);
+        fill_solid(hdc, panel, PANEL);
+        bevel(hdc, panel, Bevel::Thin);
+        SelectObject(hdc, f.bold);
+        draw_text(hdc, "Shortcut:", rect(ix + 10, cy, ix + 90, cy + 44), TEXT, LEFT);
 
-        // Toggle-shortcut row: label · current value · [Reset] [Change].
-        SelectObject(mem, f_row);
-        draw_text(mem, "Toggle shortcut", rect(ix, cy, ix + 200, cy + 28), TEXT, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-
-        let btn_w = 92;
-        let btn = lrect(ir - btn_w, cy, ir, cy + 28);
-        let btn_px = scaled(btn);
-        let btn_label = if capturing { "Press keys…" } else { "Change" };
-        fill_round(mem, btn_px, px(8), if capturing { SECTION } else { PILL_OFF });
-        SelectObject(mem, f_value);
-        draw_text(
-            mem,
-            btn_label,
-            btn_px,
-            if capturing { WINDOW_BG } else { TEXT },
-            DT_CENTER | DT_SINGLELINE | DT_VCENTER,
-        );
-        hits.push((Region::HotkeyChange, btn_px));
+        let change = rect(ir - 8 - 92, cy + 8, ir - 8, cy + 36);
+        let change_down = v.capturing || v.is_down(Region::HotkeyChange);
+        push_button(hdc, change, "Change…", f.bold, change_down, false);
+        hits.push((Region::HotkeyChange, change));
 
         // Reset — the only way back from a combination that can't be pressed.
-        let reset = lrect(btn.left - 8 - 60, cy, btn.left - 8, cy + 28);
-        let reset_px = scaled(reset);
-        fill_round(mem, reset_px, px(8), PILL_OFF);
-        draw_text(mem, "Reset", reset_px, TEXT2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-        hits.push((Region::HotkeyReset, reset_px));
+        let reset = rect(ir - 8 - 92 - 6 - 64, cy + 8, ir - 8 - 92 - 6, cy + 36);
+        push_button(hdc, reset, "Reset", f.body, v.is_down(Region::HotkeyReset), false);
+        hits.push((Region::HotkeyReset, reset));
 
-        // Current hotkey text, right-aligned before the buttons.
-        draw_text(
-            mem,
-            &hotkey_text,
-            rect(ix + 130, cy, reset.left - 12, cy + 28),
-            TEXT2,
-            DT_RIGHT | DT_SINGLELINE | DT_VCENTER,
-        );
-        cy += 28 + 2;
+        let field = rect_px(px(ix + 90), px(cy + 8), reset.left - px(10), px(cy + 36));
+        let inner = bevel(hdc, field, Bevel::Sunken);
+        fill_solid(hdc, inner, WHITE);
+        SelectObject(hdc, f.mono);
+        let shown = if v.capturing { "Press keys…" } else { v.hotkey_text.as_str() };
+        draw_text(hdc, shown, pad_x(inner, px(8)), NAVY, LEFT | DT_END_ELLIPSIS);
+        cy += 48;
 
         // Status line: validation feedback, capture hint, or a standing warning
         // that the shortcut never registered.
-        let status = match (&notice, capturing, crate::hotkey_bound()) {
+        let status = match (&v.notice, v.capturing, v.hotkey_bound) {
             (Some((text, kind)), _, _) => Some((text.clone(), *kind)),
             (None, true, _) => Some((
                 "Press a combination, or just Ctrl+Shift. Esc to cancel.".to_string(),
@@ -799,264 +1167,508 @@ unsafe fn paint(hwnd: HWND) {
             (None, false, true) => None,
         };
         if let Some((text, kind)) = status {
-            SelectObject(mem, f_small);
-            draw_text(
-                mem,
-                &text,
-                rect(ix, cy, ir, cy + 16),
-                match kind {
-                    NoticeKind::Hint => TEXT2,
-                    NoticeKind::Warn => SECTION,
-                    NoticeKind::Error => DANGER,
-                },
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER,
-            );
+            SelectObject(hdc, f.small);
+            let color = match kind {
+                NoticeKind::Hint => TEXT2,
+                NoticeKind::Warn => WARN,
+                NoticeKind::Error => DANGER,
+            };
+            draw_text(hdc, &text, rect(ix + 2, cy, ir, cy + 16), color, LEFT | DT_END_ELLIPSIS);
         }
-        cy += 16 + 12;
+        cy += 24;
 
-        // Input method (Telex only, for now).
-        SelectObject(mem, f_row);
-        draw_text(mem, "Input Method", rect(ix, cy, ix + 200, cy + 24), TEXT, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        draw_text(mem, "Telex", rect(ix, cy, ir, cy + 24), TEXT2, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
-        cy += 24 + 12;
+        // Input mode (Telex only, for now): a read-only field.
+        SelectObject(hdc, f.body);
+        draw_text(hdc, "Input Mode:", rect(ix, cy, ix + 160, cy + 26), TEXT, LEFT);
+        let mode = rect(ir - 200, cy, ir, cy + 26);
+        let inner = bevel(hdc, mode, Bevel::Sunken);
+        fill_solid(hdc, inner, WHITE);
+        draw_text(hdc, "Telex", pad_x(inner, px(8)), TEXT, LEFT);
+        cy += 36;
 
-        // Divider before the Quick Vietnamese option.
-        fill_solid(mem, rect(ix, cy, ir, cy + 1), DIVIDER);
-        cy += 14;
+        etched_line(hdc, rect(ix, cy, ir, cy));
+        cy += 12;
 
-        // Quick Vietnamese toggle + caption.
-        SelectObject(mem, f_row);
-        let qr = toggle_row(mem, ix, ir, cy, "Quick Vietnamese", quick_vn);
-        hits.push((Region::ToggleQuickVn, qr));
-        cy += 30;
-        SelectObject(mem, f_small);
-        draw_text(
-            mem,
-            "Type w → ư after an initial consonant (tw→tư, chw→chư)",
-            rect(ix, cy, ir, cy + 18),
-            TEXT2,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        // Quick Vietnamese, then its sub-option Deferred diacritics — indented,
+        // and greyed while Quick Vietnamese is off (clicks are ignored then too).
+        let r = checkbox_row(
+            hdc,
+            (ix, ir, cy),
+            "Quick Vietnamese",
+            Some("Type w → ư after an initial consonant (tw→tư, chw→chư)"),
+            (v.quick_vn, true, v.is_down(Region::ToggleQuickVn)),
+            f,
         );
-        cy += 18 + 10;
-
-        // Deferred diacritics — indented sub-option, greyed while Quick
-        // Vietnamese is off (clicks are ignored in that state too).
-        let sub_ix = ix + 16;
-        SelectObject(mem, f_row);
-        draw_text(
-            mem,
+        hits.push((Region::ToggleQuickVn, r));
+        cy += 46;
+        let r = checkbox_row(
+            hdc,
+            (ix + 20, ir, cy),
             "Deferred diacritics (Bỏ dấu sau)",
-            rect(sub_ix, cy, ir - 60, cy + 28),
-            if quick_vn { TEXT } else { TEXT2 },
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+            Some("Marks typed later apply backward (did→đi, thana→thân)"),
+            (v.quick_vn && v.deferred, v.quick_vn, v.is_down(Region::ToggleDeferred)),
+            f,
         );
-        let dr = draw_toggle(mem, ir, cy + 14, quick_vn && deferred);
-        hits.push((Region::ToggleDeferred, dr));
-        cy += 30;
-        SelectObject(mem, f_small);
-        draw_text(
-            mem,
-            "Marks typed later apply backward (did→đi, thana→thân)",
-            rect(sub_ix, cy, ir, cy + 18),
-            TEXT2,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
-        );
+        hits.push((Region::ToggleDeferred, r));
 
-        y = card.bottom + GAP;
+        y += INPUT_GROUP_H + GROUP_GAP;
     }
 
-    // ----- Card: GENERAL -----
+    // ----- Group: Target Application Scope (per-app rules) -----
     {
-        let card = lrect(PAD, y, cw - PAD, y + 128);
-        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
-        let ix = card.left + CARD_PAD;
-        let ir = card.right - CARD_PAD;
-        let mut cy = card.top + CARD_PAD;
+        let h = scope_group_height(v.app_mode, v.app_list.len());
+        group_box(hdc, lrect(gl, y, gr, y + h), "Target Application Scope", f.group);
+        let mut cy = y + GROUP_HEAD;
 
-        SelectObject(mem, f_section);
-        draw_text(mem, "GENERAL", rect(ix, cy, ir, cy + 16), SECTION, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        cy += 26;
-
-        SelectObject(mem, f_row);
-        let r1 = toggle_row(mem, ix, ir, cy, "Start with Windows", autostart);
-        hits.push((Region::ToggleAutostart, r1));
-        cy += 38;
-        let r2 = toggle_row(mem, ix, ir, cy, "Play sound on switch", sound);
-        hits.push((Region::ToggleSound, r2));
-
-        y = card.bottom + GAP;
-    }
-
-    // ----- Card: APPS (per-app rules) -----
-    {
-        let card = lrect(PAD, y, cw - PAD, y + apps_card_height(app_mode, app_list.len()));
-        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
-        let ix = card.left + CARD_PAD;
-        let ir = card.right - CARD_PAD;
-        let mut cy = card.top + CARD_PAD;
-
-        SelectObject(mem, f_section);
-        draw_text(mem, "APPS", rect(ix, cy, ir, cy + 16), SECTION, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        cy += 26;
-
-        // Mode pills.
-        let gap = 8;
-        let pill_w = (ir - ix - 2 * gap) / 3;
+        // Mode buttons: the selected one stays pushed in.
+        let gap = 6;
+        let seg_w = (ir - ix - 2 * gap) / 3;
         let modes = [
-            ("All apps", AppMode::All, Region::AppModeAll),
-            ("Only these", AppMode::Only, Region::AppModeOnly),
-            ("All except", AppMode::Except, Region::AppModeExcept),
+            ("All Apps", AppMode::All, Region::AppModeAll),
+            ("Only These", AppMode::Only, Region::AppModeOnly),
+            ("All Except", AppMode::Except, Region::AppModeExcept),
         ];
         for (i, (label, mode, region)) in modes.into_iter().enumerate() {
-            let left = ix + i as i32 * (pill_w + gap);
-            let r = rect(left, cy, left + pill_w, cy + 32);
-            draw_pill(mem, r, label, app_mode == mode, f_value);
+            let left = ix + i as i32 * (seg_w + gap);
+            let r = rect(left, cy, left + seg_w, cy + 32);
+            if v.app_mode == mode {
+                let inner = bevel(hdc, r, Bevel::Sunken);
+                fill_solid(hdc, inner, SELECTED);
+                SelectObject(hdc, f.bold);
+                draw_text(hdc, &format!("• {label}"), offset(inner, line(), line()), TEXT, CENTER);
+            } else {
+                push_button(hdc, r, label, f.body, v.is_down(region), false);
+            }
             hits.push((region, r));
         }
         cy += 32 + 10;
 
-        SelectObject(mem, f_small);
-        let caption = match app_mode {
+        let caption = match v.app_mode {
             AppMode::All => "Vietnamese typing works in every app.",
             AppMode::Only => "Vietnamese typing only in the apps below.",
             AppMode::Except => "Vietnamese typing everywhere except the apps below.",
         };
-        draw_text(mem, caption, rect(ix, cy, ir, cy + 18), TEXT2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        cy += 18;
+        let field = rect(ix, cy, ir, cy + 26);
+        let inner = bevel(hdc, field, Bevel::Sunken);
+        fill_solid(hdc, inner, FIELD_SOFT);
+        SelectObject(hdc, f.italic);
+        draw_text(hdc, caption, pad_x(inner, px(8)), TEXT2, LEFT | DT_END_ELLIPSIS);
+        cy += 26;
 
-        if app_mode != AppMode::All {
-            cy += 12;
-            if app_list.is_empty() {
+        if v.app_mode != AppMode::All {
+            cy += 10;
+            // List box of app rows, each with its own Remove button.
+            let list = rect(ix, cy, ir, cy + app_list_height(v.app_list.len()));
+            let inner = bevel(hdc, list, Bevel::Sunken);
+            fill_solid(hdc, inner, WHITE);
+            let mut ry = cy + 2;
+            if v.app_list.is_empty() {
+                SelectObject(hdc, f.italic);
                 draw_text(
-                    mem,
+                    hdc,
                     "No apps yet — add one below, or from the tray menu.",
-                    rect(ix, cy, ir, cy + 26),
+                    rect(ix + 10, ry, ir - 10, ry + APP_ROW_H),
                     TEXT2,
-                    DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+                    LEFT | DT_END_ELLIPSIS,
                 );
-                cy += 26;
-            } else {
-                for (i, app) in app_list.iter().enumerate() {
-                    SelectObject(mem, f_row);
-                    draw_text(
-                        mem,
-                        app,
-                        rect(ix, cy, ir - 90, cy + 28),
-                        TEXT,
-                        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-                    );
-                    let remove = rect(ir - 76, cy + 2, ir, cy + 26);
-                    fill_round(mem, remove, px(8), PILL_OFF);
-                    SelectObject(mem, f_small);
-                    draw_text(mem, "Remove", remove, TEXT2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-                    hits.push((Region::AppRemove(i), remove));
-                    cy += APP_ROW_H;
-                }
             }
-            cy += 6;
-            let add = rect(ix, cy, ix + 120, cy + 28);
-            fill_round(mem, add, px(8), PILL_OFF);
-            SelectObject(mem, f_value);
-            draw_text(mem, "+  Add app", add, TEXT, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+            for (i, app) in v.app_list.iter().enumerate() {
+                SelectObject(hdc, f.body);
+                draw_text(hdc, app, rect(ix + 10, ry, ir - 90, ry + APP_ROW_H), TEXT, LEFT | DT_END_ELLIPSIS);
+                let remove = rect(ir - 6 - 72, ry + 4, ir - 6, ry + APP_ROW_H - 4);
+                let region = Region::AppRemove(i);
+                push_button(hdc, remove, "Remove", f.small, v.is_down(region), false);
+                hits.push((region, remove));
+                ry += APP_ROW_H;
+            }
+            cy += app_list_height(v.app_list.len()) + 8;
+
+            let add = rect(ix, cy, ix + 110, cy + 28);
+            push_button(hdc, add, "Add App…", f.body, v.is_down(Region::AppAdd), false);
             hits.push((Region::AppAdd, add));
         }
 
-        y = card.bottom + GAP;
+        y += h + GROUP_GAP;
     }
 
-    // ----- Card: COMPATIBILITY -----
+    // ----- Group: General & System -----
     {
-        let card = lrect(PAD, y, cw - PAD, y + 128);
-        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
-        let ix = card.left + CARD_PAD;
-        let ir = card.right - CARD_PAD;
-        let mut cy = card.top + CARD_PAD;
-
-        SelectObject(mem, f_section);
-        draw_text(mem, "COMPATIBILITY", rect(ix, cy, ir, cy + 16), SECTION, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        cy += 26;
-
-        SelectObject(mem, f_row);
-        let r1 = toggle_row(mem, ix, ir, cy, "Fix browser autocomplete", fix);
-        hits.push((Region::ToggleFix, r1));
-        cy += 38;
-        let r2 = toggle_row(mem, ix, ir, cy, "Send keys step-by-step", step);
-        hits.push((Region::ToggleStep, r2));
-
-        y = card.bottom + GAP;
-    }
-
-    // ----- Card: ABOUT -----
-    {
-        let card = lrect(PAD, y, cw - PAD, y + 84);
-        fill_round(mem, scaled(card), px(CARD_RADIUS), CARD_BG);
-        let ix = card.left + CARD_PAD;
-        let ir = card.right - CARD_PAD;
-        let mut cy = card.top + CARD_PAD;
-
-        SelectObject(mem, f_section);
-        draw_text(mem, "ABOUT", rect(ix, cy, ir, cy + 16), SECTION, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        cy += 24;
-
-        SelectObject(mem, f_row);
-        let ver = format!("NovaKey v{}", env!("CARGO_PKG_VERSION"));
-        draw_text(mem, &ver, rect(ix, cy, ir, cy + 20), TEXT, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        cy += 20;
-        SelectObject(mem, f_small);
-        draw_text(
-            mem,
-            "Vietnamese Input Method for Windows",
-            rect(ix, cy, ir, cy + 18),
-            TEXT2,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        group_box(hdc, lrect(gl, y, gr, y + TWO_ROW_GROUP_H), "General & System", f.group);
+        let cy = y + GROUP_HEAD;
+        let r = checkbox_row(
+            hdc,
+            (ix, ir, cy),
+            "Start automatically with Windows",
+            None,
+            (v.autostart, true, v.is_down(Region::ToggleAutostart)),
+            f,
         );
+        hits.push((Region::ToggleAutostart, r));
+        let r = checkbox_row(
+            hdc,
+            (ix, ir, cy + CHECK_ROW_H + 8),
+            "Play sound on switch",
+            None,
+            (v.sound, true, v.is_down(Region::ToggleSound)),
+            f,
+        );
+        hits.push((Region::ToggleSound, r));
+        y += TWO_ROW_GROUP_H + GROUP_GAP;
     }
 
-    // Scroll indicator, drawn into the visible slice of the content.
-    if max_scroll > 0 {
-        let view = client.bottom;
-        let thumb_h = (view * view / content_px).max(px(32));
-        let thumb_top = scroll + (view - thumb_h) * scroll / max_scroll;
-        let thumb = rect_px(client.right - px(7), thumb_top + px(4), client.right - px(3), thumb_top + thumb_h - px(4));
-        fill_round(mem, thumb, px(4), TOGGLE_OFF);
+    // ----- Group: Compatibility Flags -----
+    {
+        group_box(hdc, lrect(gl, y, gr, y + TWO_ROW_GROUP_H), "Compatibility Flags", f.group);
+        let cy = y + GROUP_HEAD;
+        let r = checkbox_row(
+            hdc,
+            (ix, ir, cy),
+            "Fix browser autocomplete",
+            None,
+            (v.fix, true, v.is_down(Region::ToggleFix)),
+            f,
+        );
+        hits.push((Region::ToggleFix, r));
+        let r = checkbox_row(
+            hdc,
+            (ix, ir, cy + CHECK_ROW_H + 8),
+            "Send keys step-by-step",
+            None,
+            (v.step, true, v.is_down(Region::ToggleStep)),
+            f,
+        );
+        hits.push((Region::ToggleStep, r));
+        y += TWO_ROW_GROUP_H + GROUP_GAP;
     }
 
-    // Blit the visible slice and clean up.
-    let _ = BitBlt(hdc, 0, 0, client.right, client.bottom, mem, 0, scroll, SRCCOPY);
-    SelectObject(mem, old_bmp);
-    let _ = DeleteObject(bmp);
-    let _ = DeleteDC(mem);
-    for f in [f_title, f_section, f_row, f_pill, f_value, f_small] {
-        let _ = DeleteObject(f);
-    }
-    let _ = EndPaint(hwnd, &ps);
-
-    // Record hit rectangles (and the clamped scroll) for the next click.
-    UI.with(|u| {
-        if let Some(s) = u.borrow_mut().as_mut() {
-            s.hits = hits;
-            s.scroll = scroll;
-        }
-    });
+    // ----- Footer: settings apply at once, so OK just closes -----
+    etched_line(hdc, rect(gl, y, gr, y));
+    let ok = rect(gr - 96, y + 12, gr, y + 42);
+    push_button(hdc, ok, "OK", f.bold, v.is_down(Region::Ok), true);
+    hits.push((Region::Ok, ok));
 }
 
-/// A labelled row with a switch on the right. Returns the switch's hit rect.
-unsafe fn toggle_row(hdc: HDC, ix: i32, ir: i32, cy: i32, label: &str, on: bool) -> RECT {
-    draw_text(hdc, label, rect(ix, cy, ir - 60, cy + 28), TEXT, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-    draw_toggle(hdc, ir, cy + 14, on)
+/// Paint the fixed chrome over the frame bitmap: window bevel, title bar,
+/// scroll bar and status bar. `scroll_view` is (viewport, content height,
+/// scroll) in device pixels. Returns the scroll-bar geometry.
+unsafe fn paint_chrome(
+    hdc: HDC,
+    cw: i32,
+    ch: i32,
+    v: &View,
+    f: &Fonts,
+    hits: &mut Vec<(Region, RECT)>,
+    scroll_view: (RECT, i32, i32),
+) -> ScrollGeom {
+    bevel(hdc, rect_px(0, 0, cw, ch), Bevel::Window);
+
+    // Title bar.
+    let tb = title_bar(cw);
+    let (c1, c2, title_color) = if v.active {
+        (TITLE_A1, TITLE_A2, WHITE)
+    } else {
+        (TITLE_I1, TITLE_I2, TITLE_I_TEXT)
+    };
+    gradient(hdc, tb, c1, c2, false);
+    let icon_sz = px(16);
+    let icon_x = tb.left + px(4);
+    draw_app_icon(hdc, icon_x, tb.top + (tb.bottom - tb.top - icon_sz) / 2, icon_sz);
+
+    let [min_r, max_r, close_r] = title_buttons(cw);
+    SelectObject(hdc, f.title);
+    let title = format!("NovaKey Settings - v{}", env!("CARGO_PKG_VERSION"));
+    draw_text(
+        hdc,
+        &title,
+        rect_px(icon_x + icon_sz + px(6), tb.top, min_r.left - px(4), tb.bottom),
+        title_color,
+        LEFT | DT_END_ELLIPSIS,
+    );
+
+    // Caption buttons (Marlett: 0 minimize, 1 maximize, r close). Maximize is
+    // greyed — the window has a fixed size — as on any classic fixed dialog.
+    for (r, glyph, region) in [
+        (min_r, "0", Some(Region::Minimize)),
+        (max_r, "1", None),
+        (close_r, "r", Some(Region::Close)),
+    ] {
+        let down = region.is_some_and(|reg| v.is_down(reg));
+        let inner = bevel(hdc, r, if down { Bevel::Pressed } else { Bevel::Raised });
+        fill_solid(hdc, inner, FACE);
+        SelectObject(hdc, f.glyph);
+        let shift = if down { line() } else { 0 };
+        let gr = offset(inner, shift, shift);
+        if region.is_some() {
+            draw_text(hdc, glyph, gr, TEXT, CENTER);
+        } else {
+            draw_text_disabled(hdc, glyph, gr, CENTER);
+        }
+        if let Some(reg) = region {
+            hits.push((reg, r));
+        }
+    }
+
+    // Scroll bar, when the content is taller than the viewport.
+    let (view, content_px, scroll) = scroll_view;
+    let view_h = view.bottom - view.top;
+    let max_scroll = (content_px - view_h).max(0);
+    let mut geom = ScrollGeom {
+        travel: 0,
+        max_scroll,
+        page: (view_h - px(ARROW_STEP)).max(px(ARROW_STEP)),
+    };
+    if max_scroll > 0 {
+        let (l, r) = (view.right, view.right + px(SCROLLBAR_W));
+        let arrow = px(SCROLLBAR_W);
+        let up = rect_px(l, view.top, r, view.top + arrow);
+        let dn = rect_px(l, view.bottom - arrow, r, view.bottom);
+        for (b, glyph, region) in [(up, "5", Region::ScrollUp), (dn, "6", Region::ScrollDown)] {
+            let inner = bevel(hdc, b, Bevel::Raised);
+            fill_solid(hdc, inner, FACE);
+            SelectObject(hdc, f.glyph);
+            draw_text(hdc, glyph, inner, TEXT, CENTER);
+            hits.push((region, b));
+        }
+
+        let track = rect_px(l, up.bottom, r, dn.top);
+        fill_solid(hdc, track, TRACK);
+        let track_len = track.bottom - track.top;
+        let thumb_len = (track_len * view_h / content_px.max(1)).clamp(px(12).min(track_len), track_len);
+        geom.travel = track_len - thumb_len;
+        let thumb_top = track.top + geom.travel * scroll / max_scroll;
+        let thumb = rect_px(l, thumb_top, r, thumb_top + thumb_len);
+        let inner = bevel(hdc, thumb, Bevel::Raised);
+        fill_solid(hdc, inner, FACE);
+        hits.push((Region::ScrollThumb, thumb));
+        hits.push((Region::PageUp, rect_px(l, track.top, r, thumb.top)));
+        hits.push((Region::PageDown, rect_px(l, thumb.bottom, r, track.bottom)));
+    }
+
+    // Status bar: a message pane and the current language.
+    let st = rect_px(px(FRAME), ch - px(FRAME + STATUS_H - 4), cw - px(FRAME), ch - px(FRAME));
+    let lang = rect_px(st.right - px(52), st.top, st.right, st.bottom);
+    let msg = rect_px(st.left, st.top, lang.left - px(3), st.bottom);
+    let message = if v.capturing {
+        "Recording shortcut…".to_string()
+    } else if !v.hotkey_bound {
+        "Shortcut not registered".to_string()
+    } else {
+        format!("NovaKey v{} - Ready", env!("CARGO_PKG_VERSION"))
+    };
+    let inner = bevel(hdc, msg, Bevel::Thin);
+    SelectObject(hdc, f.status);
+    draw_text(hdc, &message, pad_x(inner, px(6)), TEXT, LEFT | DT_END_ELLIPSIS);
+    let inner = bevel(hdc, lang, Bevel::Thin);
+    SelectObject(hdc, f.status_bold);
+    draw_text(hdc, if v.enabled { "VN" } else { "EN" }, inner, NAVY, CENTER);
+
+    geom
+}
+
+/// The title bar, in client device pixels.
+fn title_bar(cw: i32) -> RECT {
+    rect_px(px(FRAME), px(FRAME), cw - px(FRAME), px(FRAME + TITLE_H))
+}
+
+/// Minimize, maximize and close buttons, in client device pixels.
+fn title_buttons(cw: i32) -> [RECT; 3] {
+    let tb = title_bar(cw);
+    let (bw, bh) = (px(20), px(18));
+    let top = tb.top + (tb.bottom - tb.top - bh) / 2;
+    let close = rect_px(tb.right - px(3) - bw, top, tb.right - px(3), top + bh);
+    let max = rect_px(close.left - px(2) - bw, top, close.left - px(2), top + bh);
+    let min = rect_px(max.left - bw, top, max.left, top + bh);
+    [min, max, close]
+}
+
+/// A V/E language button. The active one is the orange "lit" button.
+unsafe fn lang_button(hdc: HDC, r: RECT, letter: &str, label: &str, active: bool, down: bool, f: &Fonts) {
+    let inner = if active {
+        // Heavy black outline, like a default button, around the lit face.
+        edge(hdc, r, BLACK, BLACK);
+        let inner = bevel(hdc, inset(r, line()), Bevel::Raised);
+        gradient(hdc, inner, ORANGE_TOP, ORANGE_BOTTOM, true);
+        inner
+    } else {
+        let inner = bevel(hdc, r, if down { Bevel::Pressed } else { Bevel::Raised });
+        fill_solid(hdc, inner, FACE);
+        inner
+    };
+    let shift = if down && !active { line() } else { 0 };
+    let inner = offset(inner, shift, shift);
+
+    // Letter badge + label, centered together.
+    SelectObject(hdc, f.lang);
+    let badge = px(22);
+    let gap = px(10);
+    let total = badge + gap + text_width(hdc, label);
+    let x = inner.left + (inner.right - inner.left - total) / 2;
+    let by = inner.top + (inner.bottom - inner.top - badge) / 2;
+    let b = rect_px(x, by, x + badge, by + badge);
+    if active {
+        fill_solid(hdc, b, BLACK);
+        edge(hdc, b, WHITE, WHITE);
+    } else {
+        fill_solid(hdc, b, SHADOW);
+        edge(hdc, b, TEXT2, TEXT2);
+    }
+    SelectObject(hdc, f.badge);
+    draw_text(hdc, letter, b, WHITE, CENTER);
+    SelectObject(hdc, f.lang);
+    draw_text(
+        hdc,
+        label,
+        rect_px(b.right + gap, inner.top, inner.right, inner.bottom),
+        if active { WHITE } else { TEXT },
+        LEFT,
+    );
+}
+
+/// A checkbox with its label (and optional caption line) at `pos` = (left,
+/// right, top) in layout units; `state` = (checked, enabled, pressed). The
+/// whole row is clickable, as with a real checkbox; returns that rect.
+unsafe fn checkbox_row(
+    hdc: HDC,
+    pos: (i32, i32, i32),
+    label: &str,
+    caption: Option<&str>,
+    state: (bool, bool, bool),
+    f: &Fonts,
+) -> RECT {
+    let (x, right, cy) = pos;
+    let (checked, enabled, down) = state;
+    let row_h = if caption.is_some() { CAPTIONED_ROW_H } else { CHECK_ROW_H };
+    let label_h = if caption.is_some() { 20 } else { CHECK_ROW_H };
+    let box_top = cy + (label_h - 16) / 2;
+    checkbox(hdc, rect(x, box_top, x + 16, box_top + 16), checked, enabled, down);
+
+    SelectObject(hdc, if caption.is_some() { f.bold } else { f.body });
+    let lr = rect(x + 26, cy, right, cy + label_h);
+    if enabled {
+        draw_text(hdc, label, lr, TEXT, LEFT | DT_END_ELLIPSIS);
+    } else {
+        draw_text_disabled(hdc, label, lr, LEFT | DT_END_ELLIPSIS);
+    }
+    if let Some(caption) = caption {
+        SelectObject(hdc, f.small);
+        let cr = rect(x + 26, cy + label_h, right, cy + row_h);
+        if enabled {
+            draw_text(hdc, caption, cr, TEXT2, LEFT | DT_END_ELLIPSIS);
+        } else {
+            draw_text_disabled(hdc, caption, cr, LEFT | DT_END_ELLIPSIS);
+        }
+    }
+    rect(x, cy, right, cy + row_h)
+}
+
+/// A sunken check box: blue with a check when on, face-gray while pressed or
+/// disabled.
+unsafe fn checkbox(hdc: HDC, r: RECT, checked: bool, enabled: bool, down: bool) {
+    let inner = bevel(hdc, r, Bevel::Sunken);
+    let fill = if !enabled || down {
+        FACE
+    } else if checked {
+        CHECK_BLUE
+    } else {
+        WHITE
+    };
+    fill_solid(hdc, inner, fill);
+    if !checked {
+        return;
+    }
+    let (l, t) = (inner.left, inner.top);
+    let w = inner.right - inner.left;
+    let pts = [
+        POINT { x: l + w * 20 / 100, y: t + w * 50 / 100 },
+        POINT { x: l + w * 42 / 100, y: t + w * 72 / 100 },
+        POINT { x: l + w * 82 / 100, y: t + w * 26 / 100 },
+    ];
+    if enabled && !down {
+        // Black tick with a white halo, readable on the blue.
+        stroke(hdc, &pts, WHITE, px(4).max(3));
+        stroke(hdc, &pts, BLACK, px(2).max(2));
+    } else {
+        stroke(hdc, &pts, if enabled { BLACK } else { SHADOW }, px(2).max(2));
+    }
+}
+
+/// A classic push button. `default` adds the heavy black outline of the
+/// dialog's default button.
+unsafe fn push_button(hdc: HDC, r: RECT, label: &str, font: HFONT, down: bool, default: bool) {
+    let mut r = r;
+    if default {
+        edge(hdc, r, BLACK, BLACK);
+        r = inset(r, line());
+    }
+    let inner = bevel(hdc, r, if down { Bevel::Pressed } else { Bevel::Raised });
+    fill_solid(hdc, inner, FACE);
+    SelectObject(hdc, font);
+    let shift = if down { line() } else { 0 };
+    draw_text(hdc, label, offset(inner, shift, shift), TEXT, CENTER);
+}
+
+/// An etched group box with its label set into the top edge (`r` in layout
+/// units; the label sits on the first 16 units, the border at its middle).
+unsafe fn group_box(hdc: HDC, r: RECT, label: &str, font: HFONT) {
+    let t = line();
+    let frame = rect(r.left, r.top + 8, r.right, r.bottom);
+    outline(hdc, offset(frame, t, t), WHITE);
+    outline(hdc, rect_px(frame.left, frame.top, frame.right - t, frame.bottom - t), SHADOW);
+
+    SelectObject(hdc, font);
+    let lx = px(r.left + 10);
+    let w = text_width(hdc, label);
+    let lr = rect_px(lx, px(r.top), lx + w + px(8), px(r.top + 16));
+    fill_solid(hdc, lr, FACE);
+    draw_text(hdc, label, lr, NAVY, CENTER);
+}
+
+/// A horizontal etched separator along the top of `r` (device pixels).
+unsafe fn etched_line(hdc: HDC, r: RECT) {
+    let t = line();
+    fill_solid(hdc, rect_px(r.left, r.top, r.right, r.top + t), SHADOW);
+    fill_solid(hdc, rect_px(r.left, r.top + t, r.right, r.top + 2 * t), WHITE);
+}
+
+unsafe fn draw_app_icon(hdc: HDC, x: i32, y: i32, size: i32) {
+    let Ok(hmod) = GetModuleHandleW(None) else { return };
+    // MAKEINTRESOURCE, loaded at the exact size so it stays crisp.
+    let name = PCWSTR(crate::tray::APP_ICON_ID as usize as *const u16);
+    let Ok(h) = LoadImageW(HINSTANCE(hmod.0), name, IMAGE_ICON, size, size, LR_DEFAULTCOLOR) else {
+        return;
+    };
+    let icon = HICON(h.0);
+    let _ = DrawIconEx(hdc, x, y, icon, size, size, 0, HBRUSH::default(), DI_NORMAL);
+    let _ = DestroyIcon(icon);
 }
 
 // MARK: - GDI helpers
 
-const WINDOW_BG: COLORREF = rgb(28, 28, 31);
-const CARD_BG: COLORREF = rgb(41, 41, 46);
-const SECTION: COLORREF = rgb(255, 184, 69);
-const TEXT: COLORREF = rgb(255, 255, 255);
-const TEXT2: COLORREF = rgb(150, 150, 156);
-const DANGER: COLORREF = rgb(255, 107, 107);
-const PILL_OFF: COLORREF = rgb(48, 48, 54);
-const TOGGLE_OFF: COLORREF = rgb(66, 66, 72);
-const DIVIDER: COLORREF = rgb(52, 52, 58);
+const FACE: COLORREF = rgb(192, 192, 192);
+const LIGHT: COLORREF = rgb(223, 223, 223);
+const WHITE: COLORREF = rgb(255, 255, 255);
+const SHADOW: COLORREF = rgb(128, 128, 128);
+const BLACK: COLORREF = rgb(0, 0, 0);
+const TEXT: COLORREF = rgb(0, 0, 0);
+const TEXT2: COLORREF = rgb(88, 88, 88);
+const NAVY: COLORREF = rgb(0, 0, 128);
+const DANGER: COLORREF = rgb(176, 0, 0);
+const WARN: COLORREF = rgb(128, 80, 0);
+const PANEL: COLORREF = rgb(180, 180, 180);
+const SELECTED: COLORREF = rgb(172, 172, 172);
+const FIELD_SOFT: COLORREF = rgb(236, 236, 236);
+const TRACK: COLORREF = rgb(224, 224, 224);
+const CHECK_BLUE: COLORREF = rgb(32, 96, 232);
+const ORANGE_TOP: COLORREF = rgb(244, 146, 62);
+const ORANGE_BOTTOM: COLORREF = rgb(212, 98, 22);
+const TITLE_A1: COLORREF = rgb(0, 0, 128);
+const TITLE_A2: COLORREF = rgb(16, 132, 208);
+const TITLE_I1: COLORREF = rgb(128, 128, 128);
+const TITLE_I2: COLORREF = rgb(181, 181, 181);
+const TITLE_I_TEXT: COLORREF = rgb(212, 208, 200);
+
+const LEFT: DRAW_TEXT_FORMAT = DRAW_TEXT_FORMAT(DT_LEFT.0 | DT_SINGLELINE.0 | DT_VCENTER.0);
+const CENTER: DRAW_TEXT_FORMAT = DRAW_TEXT_FORMAT(DT_CENTER.0 | DT_SINGLELINE.0 | DT_VCENTER.0);
 
 const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF((r as u32) | ((g as u32) << 8) | ((b as u32) << 16))
@@ -1072,16 +1684,6 @@ fn lrect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
     }
 }
 
-/// A layout-unit RECT converted to device pixels.
-fn scaled(r: RECT) -> RECT {
-    RECT {
-        left: px(r.left),
-        top: px(r.top),
-        right: px(r.right),
-        bottom: px(r.bottom),
-    }
-}
-
 /// A RECT already in device pixels (no scaling).
 fn rect_px(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
     lrect(left, top, right, bottom)
@@ -1089,11 +1691,25 @@ fn rect_px(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
 
 /// A device-pixel RECT from 96-DPI layout coordinates.
 fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
-    scaled(lrect(left, top, right, bottom))
+    rect_px(px(left), px(top), px(right), px(bottom))
 }
 
-unsafe fn font(height: i32, weight: i32) -> HFONT {
-    let face = wide("Segoe UI");
+fn inset(r: RECT, d: i32) -> RECT {
+    rect_px(r.left + d, r.top + d, r.right - d, r.bottom - d)
+}
+
+fn offset(r: RECT, dx: i32, dy: i32) -> RECT {
+    rect_px(r.left + dx, r.top + dy, r.right + dx, r.bottom + dy)
+}
+
+/// Shrink `r` horizontally by `d` on both sides (text padding).
+fn pad_x(r: RECT, d: i32) -> RECT {
+    rect_px(r.left + d, r.top, r.right - d, r.bottom)
+}
+
+/// A font scaled to the current DPI.
+unsafe fn font(face: &str, height: i32, weight: i32, italic: bool) -> HFONT {
+    let face = wide(face);
     // charset=DEFAULT(1), out/clip precis=0, quality=CLEARTYPE(5), pitch=DEFAULT(0).
     CreateFontW(
         px(height),
@@ -1101,7 +1717,7 @@ unsafe fn font(height: i32, weight: i32) -> HFONT {
         0,
         0,
         weight,
-        0,
+        italic as u32,
         0,
         0,
         1,
@@ -1111,6 +1727,13 @@ unsafe fn font(height: i32, weight: i32) -> HFONT {
         0,
         PCWSTR(face.as_ptr()),
     )
+}
+
+/// The Marlett symbol font, unsmoothed so its glyphs stay pixel-sharp.
+unsafe fn marlett(height: i32) -> HFONT {
+    let face = wide("Marlett");
+    // charset=SYMBOL(2), quality=NONANTIALIASED(3).
+    CreateFontW(px(height), 0, 0, 0, 400, 0, 0, 0, 2, 0, 0, 3, 0, PCWSTR(face.as_ptr()))
 }
 
 unsafe fn draw_text(hdc: HDC, s: &str, mut r: RECT, color: COLORREF, fmt: DRAW_TEXT_FORMAT) {
@@ -1123,114 +1746,110 @@ unsafe fn draw_text(hdc: HDC, s: &str, mut r: RECT, color: COLORREF, fmt: DRAW_T
     DrawTextW(hdc, &mut buf, &mut r, fmt | DT_NOPREFIX);
 }
 
+/// Classic disabled text: gray, embossed with a white copy one line down-right.
+unsafe fn draw_text_disabled(hdc: HDC, s: &str, r: RECT, fmt: DRAW_TEXT_FORMAT) {
+    draw_text(hdc, s, offset(r, line(), line()), WHITE, fmt);
+    draw_text(hdc, s, r, SHADOW, fmt);
+}
+
+/// Width of `s` in the currently selected font, in device pixels.
+unsafe fn text_width(hdc: HDC, s: &str) -> i32 {
+    let buf: Vec<u16> = s.encode_utf16().collect();
+    let mut size = SIZE::default();
+    let _ = GetTextExtentPoint32W(hdc, &buf, &mut size);
+    size.cx
+}
+
 unsafe fn fill_solid(hdc: HDC, r: RECT, color: COLORREF) {
     let brush = CreateSolidBrush(color);
     FillRect(hdc, &r, brush);
     let _ = DeleteObject(brush);
 }
 
-unsafe fn fill_round(hdc: HDC, r: RECT, radius: i32, color: COLORREF) {
-    let brush = CreateSolidBrush(color);
-    let old_brush = SelectObject(hdc, brush);
-    let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-    let _ = RoundRect(hdc, r.left, r.top, r.right, r.bottom, radius, radius);
-    SelectObject(hdc, old_brush);
-    SelectObject(hdc, old_pen);
-    let _ = DeleteObject(brush);
+/// A one-line border: `tl` along the top and left, `br` along the bottom and
+/// right (which wins at the two mixed corners, as in the classic look).
+unsafe fn edge(hdc: HDC, r: RECT, tl: COLORREF, br: COLORREF) {
+    let t = line();
+    fill_solid(hdc, rect_px(r.left, r.top, r.right, r.top + t), tl);
+    fill_solid(hdc, rect_px(r.left, r.top, r.left + t, r.bottom), tl);
+    fill_solid(hdc, rect_px(r.left, r.bottom - t, r.right, r.bottom), br);
+    fill_solid(hdc, rect_px(r.right - t, r.top, r.right, r.bottom), br);
 }
 
-/// Fill a rounded "pill" with the brand red→orange→yellow horizontal gradient.
-unsafe fn fill_gradient_pill(hdc: HDC, r: RECT) {
-    let h = r.bottom - r.top;
-    let rgn: HRGN = CreateRoundRectRgn(r.left, r.top, r.right + 1, r.bottom + 1, h, h);
-    SelectClipRgn(hdc, rgn);
+unsafe fn outline(hdc: HDC, r: RECT, color: COLORREF) {
+    edge(hdc, r, color, color);
+}
 
-    let mid = (r.left + r.right) / 2;
-    let verts = [
-        tvtx(r.left, r.top, 230, 38, 51),
-        tvtx(mid, r.bottom, 250, 110, 41),
-        tvtx(mid, r.top, 250, 110, 41),
-        tvtx(r.right, r.bottom, 255, 199, 71),
-    ];
-    let mesh = [
-        GRADIENT_RECT {
-            UpperLeft: 0,
-            LowerRight: 1,
-        },
-        GRADIENT_RECT {
-            UpperLeft: 2,
-            LowerRight: 3,
-        },
-    ];
+#[derive(Clone, Copy)]
+enum Bevel {
+    /// A push button or scroll-bar part.
+    Raised,
+    /// A push button held down.
+    Pressed,
+    /// A text field, list box or check box.
+    Sunken,
+    /// The outer window frame.
+    Window,
+    /// A shallow one-line inset (status-bar panes, the shortcut panel).
+    Thin,
+}
+
+/// Draw a 3D border on `r` and return the area inside it.
+unsafe fn bevel(hdc: HDC, r: RECT, kind: Bevel) -> RECT {
+    let t = line();
+    let ((o_tl, o_br), (i_tl, i_br)) = match kind {
+        Bevel::Raised => ((WHITE, BLACK), (LIGHT, SHADOW)),
+        Bevel::Pressed => ((BLACK, BLACK), (SHADOW, SHADOW)),
+        Bevel::Sunken => ((SHADOW, WHITE), (BLACK, LIGHT)),
+        Bevel::Window => ((LIGHT, BLACK), (WHITE, SHADOW)),
+        Bevel::Thin => {
+            edge(hdc, r, SHADOW, WHITE);
+            return inset(r, t);
+        }
+    };
+    edge(hdc, r, o_tl, o_br);
+    edge(hdc, inset(r, t), i_tl, i_br);
+    inset(r, 2 * t)
+}
+
+/// Fill `r` with a two-color gradient, top→bottom if `vertical`, else
+/// left→right.
+unsafe fn gradient(hdc: HDC, r: RECT, from: COLORREF, to: COLORREF, vertical: bool) {
+    let verts = [tvtx(r.left, r.top, from), tvtx(r.right, r.bottom, to)];
+    let mesh = [GRADIENT_RECT {
+        UpperLeft: 0,
+        LowerRight: 1,
+    }];
     let _ = GradientFill(
         hdc,
         &verts,
         mesh.as_ptr() as *const c_void,
         mesh.len() as u32,
-        GRADIENT_FILL_RECT_H,
+        if vertical { GRADIENT_FILL_RECT_V } else { GRADIENT_FILL_RECT_H },
     );
-
-    SelectClipRgn(hdc, HRGN::default());
-    let _ = DeleteObject(rgn);
 }
 
-fn tvtx(x: i32, y: i32, r: u8, g: u8, b: u8) -> TRIVERTEX {
+fn tvtx(x: i32, y: i32, c: COLORREF) -> TRIVERTEX {
+    let ch = |shift: u32| (((c.0 >> shift) & 0xFF) as u16) << 8;
     TRIVERTEX {
         x,
         y,
-        Red: (r as u16) << 8,
-        Green: (g as u16) << 8,
-        Blue: (b as u16) << 8,
+        Red: ch(0),
+        Green: ch(8),
+        Blue: ch(16),
         Alpha: 0xFFFF,
     }
 }
 
-/// Draw a language pill; a font must already be selected into `hdc`.
-unsafe fn draw_pill(hdc: HDC, r: RECT, label: &str, active: bool, pill_font: HFONT) {
-    let h = r.bottom - r.top;
-    if active {
-        fill_gradient_pill(hdc, r);
-    } else {
-        fill_round(hdc, r, h, PILL_OFF);
-    }
-    SelectObject(hdc, pill_font);
-    let color = if active { TEXT } else { TEXT2 };
-    draw_text(hdc, label, r, color, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-}
-
-/// Draw a 44×24 switch whose right edge sits at `right_edge`, vertically
-/// centered on `cy` (layout units). Returns the device rect for hit-testing.
-unsafe fn draw_toggle(hdc: HDC, right_edge: i32, cy: i32, on: bool) -> RECT {
-    let (w, h) = (44, 24);
-    let track = rect(right_edge - w, cy - h / 2, right_edge, cy + h / 2);
-    if on {
-        fill_gradient_pill(hdc, track);
-    } else {
-        fill_round(hdc, track, track.bottom - track.top, TOGGLE_OFF);
-    }
-
-    let knob = px(18);
-    let m = px(3);
-    let kx = if on {
-        track.right - m - knob
-    } else {
-        track.left + m
-    };
-    let ky = track.top + m;
-    let brush = CreateSolidBrush(rgb(255, 255, 255));
-    let ob = SelectObject(hdc, brush);
-    let op = SelectObject(hdc, GetStockObject(NULL_PEN));
-    let _ = Ellipse(hdc, kx, ky, kx + knob, ky + knob);
-    SelectObject(hdc, ob);
-    SelectObject(hdc, op);
-    let _ = DeleteObject(brush);
-    track
+/// Draw a polyline through `pts` with a solid pen.
+unsafe fn stroke(hdc: HDC, pts: &[POINT], color: COLORREF, width: i32) {
+    let pen = CreatePen(PS_SOLID, width, color);
+    let old = SelectObject(hdc, pen);
+    let _ = Polyline(hdc, pts);
+    SelectObject(hdc, old);
+    let _ = DeleteObject(pen);
 }
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
-
-// Silence unused-type warnings for handles only produced transiently.
-#[allow(dead_code)]
-fn _touch(_: HBITMAP, _: HBRUSH, _: HGDIOBJ) {}
