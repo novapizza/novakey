@@ -1,8 +1,10 @@
 //! ui.rs
-//! An owner-drawn Settings window in the classic Windows 9x style: a beveled
-//! gray frame with a gradient title bar, etched group boxes, 3D push buttons,
-//! checkboxes and a sunken status bar (INPUT METHOD / APP SCOPE / GENERAL /
-//! COMPATIBILITY, mirroring the macOS preferences pane).
+//! An owner-drawn Settings window (INPUT METHOD / APP SCOPE / GENERAL /
+//! APPEARANCE / COMPATIBILITY, mirroring the macOS preferences pane) in one of
+//! four themes, chosen under Appearance: classic Windows 9x (the default — a
+//! beveled gray frame with a gradient title bar, etched group boxes, 3D push
+//! buttons and a sunken status bar), Windows 3.1, Windows 10/11 flat, and
+//! Mac OS 9 Platinum. Every theme shares one layout; only the painting differs.
 //!
 //! Everything — including the title bar and frame — is drawn by hand with GDI
 //! into off-screen bitmaps (flicker-free double buffering); interactive
@@ -32,16 +34,17 @@ use windows::Win32::Foundation::{
     COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
     CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
     GetMonitorInfoW, GetTextExtentPoint32W, GradientFill, InvalidateRect, MonitorFromWindow,
-    Polyline, ScreenToClient, SelectObject, SetBkMode, SetTextColor, UpdateWindow,
+    Polyline, RoundRect, ScreenToClient, SelectObject, SetBkMode, SetTextColor, UpdateWindow,
     DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
     GRADIENT_FILL_RECT_H, GRADIENT_FILL_RECT_V, GRADIENT_RECT, HBRUSH, HDC, HFONT, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT, TRIVERTEX,
+    MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PS_INSIDEFRAME, PS_SOLID, SRCCOPY, TRANSPARENT,
+    TRIVERTEX,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -54,7 +57,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, DrawIconEx, GetClientRect, GetSystemMetrics, GetWindowRect, IsWindow,
     LoadCursorW, LoadImageW, RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow,
     TrackPopupMenu, DI_NORMAL, HICON, HMENU, HTCAPTION, IDC_ARROW, IMAGE_ICON, LR_DEFAULTCOLOR,
-    MF_GRAYED, MF_STRING, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_MINIMIZE,
+    MF_CHECKED, MF_GRAYED, MF_STRING, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_MINIMIZE,
     SW_SHOW, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN, WINDOW_STYLE, WM_ACTIVATE,
     WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP,
     WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
@@ -62,7 +65,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::hotkey;
-use crate::settings::{AppMode, Settings};
+use crate::settings::{AppMode, Settings, Theme};
 use crate::tray::{
     CMD_APPS_CHANGED, CMD_AUTOCOMPLETE, CMD_AUTOSTART, CMD_DEFERRED, CMD_PLAYSOUND, CMD_QUICKVN,
     CMD_STEP, CMD_TOGGLE,
@@ -107,6 +110,8 @@ const CAPTIONED_ROW_H: i32 = 38;
 const INPUT_GROUP_H: i32 = GROUP_HEAD + 52 + 48 + 24 + 36 + 12 + 46 + CAPTIONED_ROW_H + GROUP_PAD;
 /// GENERAL and COMPATIBILITY: two plain checkbox rows each.
 const TWO_ROW_GROUP_H: i32 = GROUP_HEAD + CHECK_ROW_H + 8 + CHECK_ROW_H + GROUP_PAD;
+/// APPEARANCE: the theme picker row.
+const APPEARANCE_GROUP_H: i32 = GROUP_HEAD + 26 + GROUP_PAD;
 /// Etched separator plus the OK button row.
 const FOOTER_H: i32 = 12 + 30 + 10;
 
@@ -130,9 +135,12 @@ enum Region {
     /// "Remove" on row `n` of the current app list.
     AppRemove(usize),
     AppAdd,
+    ThemePick,
     Ok,
     Minimize,
     Close,
+    /// The Windows 3.1 system-menu box.
+    SysMenu,
     ScrollUp,
     ScrollDown,
     PageUp,
@@ -206,6 +214,19 @@ thread_local! {
     static UI: RefCell<Option<UiState>> = const { RefCell::new(None) };
     /// DPI of the Settings window's current monitor (96 = 100%).
     static DPI: Cell<u32> = const { Cell::new(96) };
+    /// The theme being painted (a copy of `Settings::theme`, see `sync_theme`).
+    static THEME: Cell<Theme> = const { Cell::new(Theme::Classic) };
+}
+
+/// The current theme.
+fn theme() -> Theme {
+    THEME.with(|t| t.get())
+}
+
+/// Adopt the saved theme.
+fn sync_theme() {
+    let t = crate::SETTINGS.with(|s| s.borrow().theme);
+    THEME.with(|c| c.set(t));
 }
 
 /// Scale a 96-DPI layout length to the window's current DPI.
@@ -255,6 +276,7 @@ pub unsafe fn open(main_hwnd: HWND) {
     // Ignore ERROR_CLASS_ALREADY_EXISTS on subsequent opens.
     RegisterClassW(&wc);
 
+    sync_theme();
     let title = wide("NovaKey Settings");
     let hwnd = match CreateWindowExW(
         Default::default(),
@@ -290,15 +312,7 @@ pub unsafe fn open(main_hwnd: HWND) {
         });
     });
 
-    // Square corners: Windows 11 would otherwise round the top-level window.
-    // Fails harmlessly on Windows 10, which never rounds.
-    let pref = DWMWCP_DONOTROUND;
-    let _ = DwmSetWindowAttribute(
-        hwnd,
-        DWMWA_WINDOW_CORNER_PREFERENCE,
-        &pref as *const _ as *const c_void,
-        std::mem::size_of_val(&pref) as u32,
-    );
+    apply_corners(hwnd);
 
     // Size for the monitor's DPI, then center on that monitor.
     DPI.with(|d| d.set(GetDpiForWindow(hwnd).max(96)));
@@ -307,6 +321,19 @@ pub unsafe fn open(main_hwnd: HWND) {
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = UpdateWindow(hwnd);
     let _ = SetForegroundWindow(hwnd);
+}
+
+/// Square corners for the retro themes: Windows 11 would otherwise round the
+/// top-level window. The flat theme keeps the rounding. Fails harmlessly on
+/// Windows 10, which never rounds.
+unsafe fn apply_corners(hwnd: HWND) {
+    let pref = if theme() == Theme::Flat { DWMWCP_ROUND } else { DWMWCP_DONOTROUND };
+    let _ = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_WINDOW_CORNER_PREFERENCE,
+        &pref as *const _ as *const c_void,
+        std::mem::size_of_val(&pref) as u32,
+    );
 }
 
 /// Repaint the Settings window if it is open (called after a state change made
@@ -331,6 +358,8 @@ fn content_height() -> i32 {
         + scope_group_height(mode, n)
         + GROUP_GAP
         + TWO_ROW_GROUP_H
+        + GROUP_GAP
+        + APPEARANCE_GROUP_H
         + GROUP_GAP
         + TWO_ROW_GROUP_H
         + GROUP_GAP
@@ -414,7 +443,7 @@ unsafe extern "system" fn wnd_proc(
             let mut client = RECT::default();
             let _ = GetClientRect(hwnd, &mut client);
             if contains(&title_bar(client.right), pt)
-                && !title_buttons(client.right).iter().any(|r| contains(r, pt))
+                && !title_buttons(client.right).iter().any(|(_, r)| contains(r, pt))
             {
                 return LRESULT(HTCAPTION as isize);
             }
@@ -644,6 +673,37 @@ unsafe fn activate(hwnd: HWND, region: Region, hit_rect: RECT) {
             let _ = ShowWindow(hwnd, SW_MINIMIZE);
             return;
         }
+        Region::SysMenu => {
+            let anchor = POINT {
+                x: hit_rect.left,
+                y: hit_rect.bottom,
+            };
+            match system_menu(hwnd, anchor) {
+                Some(Region::Minimize) => {
+                    let _ = ShowWindow(hwnd, SW_MINIMIZE);
+                }
+                Some(Region::Close) => {
+                    let _ = DestroyWindow(hwnd);
+                }
+                _ => {}
+            }
+            return;
+        }
+        Region::ThemePick => {
+            let anchor = POINT {
+                x: hit_rect.left,
+                y: hit_rect.bottom,
+            };
+            if let Some(theme) = pick_theme(hwnd, anchor) {
+                crate::SETTINGS.with(|s| {
+                    let mut s = s.borrow_mut();
+                    s.theme = theme;
+                    s.save();
+                });
+                sync_theme();
+                apply_corners(hwnd);
+            }
+        }
         Region::HotkeyChange => {
             set_capturing(true);
             set_notice(None);
@@ -739,6 +799,44 @@ unsafe fn pick_app(hwnd: HWND, anchor: POINT) -> Option<String> {
         let _ = AppendMenuW(menu, MF_STRING, FIRST_APP + i, PCWSTR(label.as_ptr()));
     }
 
+    let cmd = track_menu(hwnd, menu, anchor);
+    apps.get(cmd.checked_sub(FIRST_APP)?).cloned()
+}
+
+/// Pop up the theme list below `anchor` (client coordinates), the current
+/// theme checked. Returns the chosen theme.
+unsafe fn pick_theme(hwnd: HWND, anchor: POINT) -> Option<Theme> {
+    const FIRST_THEME: usize = 100;
+    let menu = CreatePopupMenu().ok()?;
+    for (i, t) in Theme::ALL.iter().enumerate() {
+        let label = wide(t.name());
+        let flags = if *t == theme() { MF_STRING | MF_CHECKED } else { MF_STRING };
+        let _ = AppendMenuW(menu, flags, FIRST_THEME + i, PCWSTR(label.as_ptr()));
+    }
+    let cmd = track_menu(hwnd, menu, anchor);
+    Theme::ALL.get(cmd.checked_sub(FIRST_THEME)?).copied()
+}
+
+/// The Windows 3.1 system menu, below `anchor` (client coordinates). Returns
+/// `Region::Minimize` or `Region::Close` for the chosen command.
+unsafe fn system_menu(hwnd: HWND, anchor: POINT) -> Option<Region> {
+    const MINIMIZE: usize = 1;
+    const CLOSE: usize = 2;
+    let menu = CreatePopupMenu().ok()?;
+    let minimize = wide("Mi&nimize");
+    let close = wide("&Close\tAlt+F4");
+    let _ = AppendMenuW(menu, MF_STRING, MINIMIZE, PCWSTR(minimize.as_ptr()));
+    let _ = AppendMenuW(menu, MF_STRING, CLOSE, PCWSTR(close.as_ptr()));
+    match track_menu(hwnd, menu, anchor) {
+        MINIMIZE => Some(Region::Minimize),
+        CLOSE => Some(Region::Close),
+        _ => None,
+    }
+}
+
+/// Show `menu` below `anchor` (client coordinates), then destroy it. Returns
+/// the chosen command id, or 0 if the menu was dismissed.
+unsafe fn track_menu(hwnd: HWND, menu: HMENU, anchor: POINT) -> usize {
     let mut pt = anchor;
     let _ = ClientToScreen(hwnd, &mut pt);
     let cmd = TrackPopupMenu(
@@ -752,7 +850,7 @@ unsafe fn pick_app(hwnd: HWND, anchor: POINT) -> Option<String> {
     )
     .0 as usize;
     let _ = DestroyMenu(menu);
-    apps.get(cmd.checked_sub(FIRST_APP)?).cloned()
+    cmd
 }
 
 /// Reuse the main window's existing WM_COMMAND handlers so all state mutation
@@ -931,26 +1029,79 @@ struct Fonts {
     mono: HFONT,
     status: HFONT,
     status_bold: HFONT,
-    /// Marlett: the system font that holds the classic caption-button and
-    /// scroll-arrow glyphs.
+    /// Caption-button and arrow glyphs (see `glyph`): Marlett, the system font
+    /// that holds the classic ones, or Segoe MDL2 Assets in the flat theme.
     glyph: HFONT,
 }
 
 impl Fonts {
+    /// The current theme's fonts.
     unsafe fn new() -> Self {
-        Fonts {
-            title: font("Tahoma", -14, 700, false),
-            group: font("Tahoma", -14, 700, false),
-            body: font("Tahoma", -14, 400, false),
-            bold: font("Tahoma", -14, 700, false),
-            small: font("Tahoma", -12, 400, false),
-            italic: font("Tahoma", -13, 400, true),
-            lang: font("Tahoma", -16, 700, false),
-            badge: font("Tahoma", -13, 700, false),
-            mono: font("Courier New", -15, 700, false),
-            status: font("Courier New", -13, 400, false),
-            status_bold: font("Courier New", -14, 700, false),
-            glyph: marlett(-11),
+        match theme() {
+            Theme::Classic => Fonts {
+                title: font("Tahoma", -14, 700, false),
+                group: font("Tahoma", -14, 700, false),
+                body: font("Tahoma", -14, 400, false),
+                bold: font("Tahoma", -14, 700, false),
+                small: font("Tahoma", -12, 400, false),
+                italic: font("Tahoma", -13, 400, true),
+                lang: font("Tahoma", -16, 700, false),
+                badge: font("Tahoma", -13, 700, false),
+                mono: font("Courier New", -15, 700, false),
+                status: font("Courier New", -13, 400, false),
+                status_bold: font("Courier New", -14, 700, false),
+                glyph: marlett(-11),
+            },
+            // The bold dialog face of Windows 3.1 (unsmoothed, see `font`).
+            Theme::Win31 => {
+                let ui = "Microsoft Sans Serif";
+                Fonts {
+                    title: font(ui, -14, 700, false),
+                    group: font(ui, -14, 700, false),
+                    body: font(ui, -14, 700, false),
+                    bold: font(ui, -14, 700, false),
+                    small: font(ui, -12, 400, false),
+                    italic: font(ui, -13, 400, false),
+                    lang: font(ui, -16, 700, false),
+                    badge: font(ui, -13, 700, false),
+                    mono: font("Courier New", -15, 700, false),
+                    status: font(ui, -12, 400, false),
+                    status_bold: font(ui, -13, 700, false),
+                    glyph: marlett(-11),
+                }
+            }
+            Theme::Flat => {
+                let ui = "Segoe UI";
+                Fonts {
+                    title: font(ui, -12, 400, false),
+                    group: font(ui, -14, 600, false),
+                    body: font(ui, -14, 400, false),
+                    bold: font(ui, -14, 600, false),
+                    small: font(ui, -12, 400, false),
+                    italic: font(ui, -13, 400, false),
+                    lang: font(ui, -15, 600, false),
+                    badge: font(ui, -13, 700, false),
+                    mono: font("Consolas", -15, 400, false),
+                    status: font(ui, -12, 400, false),
+                    status_bold: font(ui, -12, 700, false),
+                    glyph: font("Segoe MDL2 Assets", -10, 400, false),
+                }
+            }
+            // Charcoal and Geneva aren't on Windows; Arial and Verdana stand in.
+            Theme::Platinum => Fonts {
+                title: font("Arial", -13, 700, false),
+                group: font("Arial", -13, 700, false),
+                body: font("Verdana", -12, 400, false),
+                bold: font("Verdana", -12, 700, false),
+                small: font("Verdana", -11, 400, false),
+                italic: font("Verdana", -11, 400, true),
+                lang: font("Arial", -15, 700, false),
+                badge: font("Arial", -12, 700, false),
+                mono: font("Courier New", -14, 700, false),
+                status: font("Verdana", -11, 400, false),
+                status_bold: font("Verdana", -11, 700, false),
+                glyph: marlett(-11),
+            },
         }
     }
 
@@ -974,8 +1125,41 @@ impl Fonts {
     }
 }
 
+/// A glyph in `Fonts::glyph`.
+#[derive(Clone, Copy)]
+enum Glyph {
+    Minimize,
+    Maximize,
+    Close,
+    Up,
+    Down,
+}
+
+fn glyph(g: Glyph) -> &'static str {
+    if theme() == Theme::Flat {
+        // Segoe MDL2 Assets: the Windows 10/11 caption buttons and chevrons.
+        match g {
+            Glyph::Minimize => "\u{E921}",
+            Glyph::Maximize => "\u{E922}",
+            Glyph::Close => "\u{E8BB}",
+            Glyph::Up => "\u{E70E}",
+            Glyph::Down => "\u{E70D}",
+        }
+    } else {
+        // Marlett.
+        match g {
+            Glyph::Minimize => "0",
+            Glyph::Maximize => "1",
+            Glyph::Close => "r",
+            Glyph::Up => "5",
+            Glyph::Down => "6",
+        }
+    }
+}
+
 unsafe fn paint(hwnd: HWND) {
     // Snapshot the state we render.
+    sync_theme();
     let (autostart, step, sound, quick_vn, deferred, mods, vk, app_mode, app_list) =
         crate::SETTINGS.with(|s| {
             let s = s.borrow();
@@ -1022,6 +1206,7 @@ unsafe fn paint(hwnd: HWND) {
         active,
         down,
     };
+    let p = pal();
 
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
@@ -1048,7 +1233,7 @@ unsafe fn paint(hwnd: HWND) {
     let cdc = CreateCompatibleDC(hdc);
     let cbmp = CreateCompatibleBitmap(hdc, (view_right - view_left).max(1), content_px.max(1));
     let old_cbmp = SelectObject(cdc, cbmp);
-    fill_solid(cdc, rect_px(0, 0, view_right - view_left, content_px), FACE);
+    fill_solid(cdc, rect_px(0, 0, view_right - view_left, content_px), p.bg);
     let mut content_hits = Vec::new();
     paint_content(cdc, unpx(view_right - view_left), &v, &fonts, &mut content_hits);
 
@@ -1056,7 +1241,7 @@ unsafe fn paint(hwnd: HWND) {
     let fdc = CreateCompatibleDC(hdc);
     let fbmp = CreateCompatibleBitmap(hdc, cw, ch);
     let old_fbmp = SelectObject(fdc, fbmp);
-    fill_solid(fdc, client, FACE);
+    fill_solid(fdc, client, p.bg);
     let _ = BitBlt(fdc, view_left, view_top, view.right - view.left, view_h, cdc, 0, scroll, SRCCOPY);
 
     // Content hits move into client coordinates, clipped to the viewport.
@@ -1102,10 +1287,11 @@ unsafe fn paint(hwnd: HWND) {
     });
 }
 
-/// Paint the scrolling content: the four group boxes and the OK button.
-/// `cw` is the content width in layout units; hit rects are recorded in
+/// Paint the scrolling content: the group boxes and the OK button. `cw` is
+/// the content width in layout units; hit rects are recorded in
 /// content-bitmap device pixels.
 unsafe fn paint_content(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(Region, RECT)>) {
+    let p = pal();
     let gl = MARGIN;
     let gr = cw - MARGIN;
     let ix = gl + GROUP_PAD;
@@ -1129,10 +1315,10 @@ unsafe fn paint_content(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(
 
         // Toggle-shortcut panel: label · current value · [Reset] [Change…].
         let panel = rect(ix, cy, ir, cy + 44);
-        fill_solid(hdc, panel, PANEL);
+        fill_solid(hdc, panel, p.panel);
         bevel(hdc, panel, Bevel::Thin);
         SelectObject(hdc, f.bold);
-        draw_text(hdc, "Shortcut:", rect(ix + 10, cy, ix + 90, cy + 44), TEXT, LEFT);
+        draw_text(hdc, "Shortcut:", rect(ix + 10, cy, ix + 90, cy + 44), p.text, LEFT);
 
         let change = rect(ir - 8 - 92, cy + 8, ir - 8, cy + 36);
         let change_down = v.capturing || v.is_down(Region::HotkeyChange);
@@ -1146,10 +1332,10 @@ unsafe fn paint_content(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(
 
         let field = rect_px(px(ix + 90), px(cy + 8), reset.left - px(10), px(cy + 36));
         let inner = bevel(hdc, field, Bevel::Sunken);
-        fill_solid(hdc, inner, WHITE);
+        fill_solid(hdc, inner, p.field);
         SelectObject(hdc, f.mono);
         let shown = if v.capturing { "Press keys…" } else { v.hotkey_text.as_str() };
-        draw_text(hdc, shown, pad_x(inner, px(8)), NAVY, LEFT | DT_END_ELLIPSIS);
+        draw_text(hdc, shown, pad_x(inner, px(8)), p.accent_text, LEFT | DT_END_ELLIPSIS);
         cy += 48;
 
         // Status line: validation feedback, capture hint, or a standing warning
@@ -1169,9 +1355,9 @@ unsafe fn paint_content(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(
         if let Some((text, kind)) = status {
             SelectObject(hdc, f.small);
             let color = match kind {
-                NoticeKind::Hint => TEXT2,
-                NoticeKind::Warn => WARN,
-                NoticeKind::Error => DANGER,
+                NoticeKind::Hint => p.text2,
+                NoticeKind::Warn => p.warn,
+                NoticeKind::Error => p.danger,
             };
             draw_text(hdc, &text, rect(ix + 2, cy, ir, cy + 16), color, LEFT | DT_END_ELLIPSIS);
         }
@@ -1179,11 +1365,11 @@ unsafe fn paint_content(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(
 
         // Input mode (Telex only, for now): a read-only field.
         SelectObject(hdc, f.body);
-        draw_text(hdc, "Input Mode:", rect(ix, cy, ix + 160, cy + 26), TEXT, LEFT);
+        draw_text(hdc, "Input Mode:", rect(ix, cy, ix + 160, cy + 26), p.text, LEFT);
         let mode = rect(ir - 200, cy, ir, cy + 26);
         let inner = bevel(hdc, mode, Bevel::Sunken);
-        fill_solid(hdc, inner, WHITE);
-        draw_text(hdc, "Telex", pad_x(inner, px(8)), TEXT, LEFT);
+        fill_solid(hdc, inner, p.field);
+        draw_text(hdc, "Telex", pad_x(inner, px(8)), p.text, LEFT);
         cy += 36;
 
         etched_line(hdc, rect(ix, cy, ir, cy));
@@ -1232,10 +1418,7 @@ unsafe fn paint_content(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(
             let left = ix + i as i32 * (seg_w + gap);
             let r = rect(left, cy, left + seg_w, cy + 32);
             if v.app_mode == mode {
-                let inner = bevel(hdc, r, Bevel::Sunken);
-                fill_solid(hdc, inner, SELECTED);
-                SelectObject(hdc, f.bold);
-                draw_text(hdc, &format!("• {label}"), offset(inner, line(), line()), TEXT, CENTER);
+                selected_button(hdc, r, label, f);
             } else {
                 push_button(hdc, r, label, f.body, v.is_down(region), false);
             }
@@ -1250,9 +1433,9 @@ unsafe fn paint_content(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(
         };
         let field = rect(ix, cy, ir, cy + 26);
         let inner = bevel(hdc, field, Bevel::Sunken);
-        fill_solid(hdc, inner, FIELD_SOFT);
+        fill_solid(hdc, inner, p.field_soft);
         SelectObject(hdc, f.italic);
-        draw_text(hdc, caption, pad_x(inner, px(8)), TEXT2, LEFT | DT_END_ELLIPSIS);
+        draw_text(hdc, caption, pad_x(inner, px(8)), p.text2, LEFT | DT_END_ELLIPSIS);
         cy += 26;
 
         if v.app_mode != AppMode::All {
@@ -1260,7 +1443,7 @@ unsafe fn paint_content(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(
             // List box of app rows, each with its own Remove button.
             let list = rect(ix, cy, ir, cy + app_list_height(v.app_list.len()));
             let inner = bevel(hdc, list, Bevel::Sunken);
-            fill_solid(hdc, inner, WHITE);
+            fill_solid(hdc, inner, p.field);
             let mut ry = cy + 2;
             if v.app_list.is_empty() {
                 SelectObject(hdc, f.italic);
@@ -1268,13 +1451,13 @@ unsafe fn paint_content(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(
                     hdc,
                     "No apps yet — add one below, or from the tray menu.",
                     rect(ix + 10, ry, ir - 10, ry + APP_ROW_H),
-                    TEXT2,
+                    p.text2,
                     LEFT | DT_END_ELLIPSIS,
                 );
             }
             for (i, app) in v.app_list.iter().enumerate() {
                 SelectObject(hdc, f.body);
-                draw_text(hdc, app, rect(ix + 10, ry, ir - 90, ry + APP_ROW_H), TEXT, LEFT | DT_END_ELLIPSIS);
+                draw_text(hdc, app, rect(ix + 10, ry, ir - 90, ry + APP_ROW_H), p.text, LEFT | DT_END_ELLIPSIS);
                 let remove = rect(ir - 6 - 72, ry + 4, ir - 6, ry + APP_ROW_H - 4);
                 let region = Region::AppRemove(i);
                 push_button(hdc, remove, "Remove", f.small, v.is_down(region), false);
@@ -1316,6 +1499,18 @@ unsafe fn paint_content(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(
         y += TWO_ROW_GROUP_H + GROUP_GAP;
     }
 
+    // ----- Group: Appearance -----
+    {
+        group_box(hdc, lrect(gl, y, gr, y + APPEARANCE_GROUP_H), "Appearance", f.group);
+        let cy = y + GROUP_HEAD;
+        SelectObject(hdc, f.body);
+        draw_text(hdc, "Theme:", rect(ix, cy, ix + 160, cy + 26), p.text, LEFT);
+        let pick = rect(ir - 200, cy, ir, cy + 26);
+        combo(hdc, pick, theme().name(), v.is_down(Region::ThemePick), f);
+        hits.push((Region::ThemePick, pick));
+        y += APPEARANCE_GROUP_H + GROUP_GAP;
+    }
+
     // ----- Group: Compatibility Flags -----
     {
         group_box(hdc, lrect(gl, y, gr, y + TWO_ROW_GROUP_H), "Compatibility Flags", f.group);
@@ -1348,7 +1543,7 @@ unsafe fn paint_content(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(
     hits.push((Region::Ok, ok));
 }
 
-/// Paint the fixed chrome over the frame bitmap: window bevel, title bar,
+/// Paint the fixed chrome over the frame bitmap: window frame, title bar,
 /// scroll bar and status bar. `scroll_view` is (viewport, content height,
 /// scroll) in device pixels. Returns the scroll-bar geometry.
 unsafe fn paint_chrome(
@@ -1360,53 +1555,9 @@ unsafe fn paint_chrome(
     hits: &mut Vec<(Region, RECT)>,
     scroll_view: (RECT, i32, i32),
 ) -> ScrollGeom {
+    let p = pal();
     bevel(hdc, rect_px(0, 0, cw, ch), Bevel::Window);
-
-    // Title bar.
-    let tb = title_bar(cw);
-    let (c1, c2, title_color) = if v.active {
-        (TITLE_A1, TITLE_A2, WHITE)
-    } else {
-        (TITLE_I1, TITLE_I2, TITLE_I_TEXT)
-    };
-    gradient(hdc, tb, c1, c2, false);
-    let icon_sz = px(16);
-    let icon_x = tb.left + px(4);
-    draw_app_icon(hdc, icon_x, tb.top + (tb.bottom - tb.top - icon_sz) / 2, icon_sz);
-
-    let [min_r, max_r, close_r] = title_buttons(cw);
-    SelectObject(hdc, f.title);
-    let title = format!("NovaKey Settings - v{}", env!("CARGO_PKG_VERSION"));
-    draw_text(
-        hdc,
-        &title,
-        rect_px(icon_x + icon_sz + px(6), tb.top, min_r.left - px(4), tb.bottom),
-        title_color,
-        LEFT | DT_END_ELLIPSIS,
-    );
-
-    // Caption buttons (Marlett: 0 minimize, 1 maximize, r close). Maximize is
-    // greyed — the window has a fixed size — as on any classic fixed dialog.
-    for (r, glyph, region) in [
-        (min_r, "0", Some(Region::Minimize)),
-        (max_r, "1", None),
-        (close_r, "r", Some(Region::Close)),
-    ] {
-        let down = region.is_some_and(|reg| v.is_down(reg));
-        let inner = bevel(hdc, r, if down { Bevel::Pressed } else { Bevel::Raised });
-        fill_solid(hdc, inner, FACE);
-        SelectObject(hdc, f.glyph);
-        let shift = if down { line() } else { 0 };
-        let gr = offset(inner, shift, shift);
-        if region.is_some() {
-            draw_text(hdc, glyph, gr, TEXT, CENTER);
-        } else {
-            draw_text_disabled(hdc, glyph, gr, CENTER);
-        }
-        if let Some(reg) = region {
-            hits.push((reg, r));
-        }
-    }
+    paint_title_bar(hdc, cw, v, f, hits);
 
     // Scroll bar, when the content is taller than the viewport.
     let (view, content_px, scroll) = scroll_view;
@@ -1422,23 +1573,19 @@ unsafe fn paint_chrome(
         let arrow = px(SCROLLBAR_W);
         let up = rect_px(l, view.top, r, view.top + arrow);
         let dn = rect_px(l, view.bottom - arrow, r, view.bottom);
-        for (b, glyph, region) in [(up, "5", Region::ScrollUp), (dn, "6", Region::ScrollDown)] {
-            let inner = bevel(hdc, b, Bevel::Raised);
-            fill_solid(hdc, inner, FACE);
-            SelectObject(hdc, f.glyph);
-            draw_text(hdc, glyph, inner, TEXT, CENTER);
+        for (b, g, region) in [(up, Glyph::Up, Region::ScrollUp), (dn, Glyph::Down, Region::ScrollDown)] {
+            scroll_arrow(hdc, b, g, f);
             hits.push((region, b));
         }
 
         let track = rect_px(l, up.bottom, r, dn.top);
-        fill_solid(hdc, track, TRACK);
+        fill_solid(hdc, track, p.track);
         let track_len = track.bottom - track.top;
         let thumb_len = (track_len * view_h / content_px.max(1)).clamp(px(12).min(track_len), track_len);
         geom.travel = track_len - thumb_len;
         let thumb_top = track.top + geom.travel * scroll / max_scroll;
         let thumb = rect_px(l, thumb_top, r, thumb_top + thumb_len);
-        let inner = bevel(hdc, thumb, Bevel::Raised);
-        fill_solid(hdc, inner, FACE);
+        scroll_thumb(hdc, thumb);
         hits.push((Region::ScrollThumb, thumb));
         hits.push((Region::PageUp, rect_px(l, track.top, r, thumb.top)));
         hits.push((Region::PageDown, rect_px(l, thumb.bottom, r, track.bottom)));
@@ -1455,47 +1602,411 @@ unsafe fn paint_chrome(
     } else {
         format!("NovaKey v{} - Ready", env!("CARGO_PKG_VERSION"))
     };
-    let inner = bevel(hdc, msg, Bevel::Thin);
-    SelectObject(hdc, f.status);
-    draw_text(hdc, &message, pad_x(inner, px(6)), TEXT, LEFT | DT_END_ELLIPSIS);
-    let inner = bevel(hdc, lang, Bevel::Thin);
-    SelectObject(hdc, f.status_bold);
-    draw_text(hdc, if v.enabled { "VN" } else { "EN" }, inner, NAVY, CENTER);
+    let lang_text = if v.enabled { "VN" } else { "EN" };
+    if theme() == Theme::Flat {
+        // No panes: plain text under a hairline.
+        let y = st.top - px(2);
+        fill_solid(hdc, rect_px(line(), y, cw - line(), y + line()), p.light);
+        SelectObject(hdc, f.status);
+        draw_text(hdc, &message, pad_x(msg, px(6)), p.text2, LEFT | DT_END_ELLIPSIS);
+        SelectObject(hdc, f.status_bold);
+        draw_text(hdc, lang_text, lang, p.accent_text, CENTER);
+    } else {
+        let inner = bevel(hdc, msg, Bevel::Thin);
+        SelectObject(hdc, f.status);
+        draw_text(hdc, &message, pad_x(inner, px(6)), p.text, LEFT | DT_END_ELLIPSIS);
+        let inner = bevel(hdc, lang, Bevel::Thin);
+        SelectObject(hdc, f.status_bold);
+        draw_text(hdc, lang_text, inner, p.accent_text, CENTER);
+    }
 
     geom
 }
 
-/// The title bar, in client device pixels.
+/// A title-bar button.
+#[derive(Clone, Copy, PartialEq)]
+enum Caption {
+    Minimize,
+    /// Inert: the window has a fixed size.
+    Maximize,
+    Close,
+    /// The Windows 3.1 system-menu box, which stands in for a close button.
+    SysMenu,
+}
+
+impl Caption {
+    /// What a click on the button does; `None` for the inert maximize.
+    fn region(self) -> Option<Region> {
+        match self {
+            Caption::Minimize => Some(Region::Minimize),
+            Caption::Maximize => None,
+            Caption::Close => Some(Region::Close),
+            Caption::SysMenu => Some(Region::SysMenu),
+        }
+    }
+
+    fn glyph(self) -> Glyph {
+        match self {
+            Caption::Minimize => Glyph::Minimize,
+            Caption::Maximize => Glyph::Maximize,
+            Caption::Close | Caption::SysMenu => Glyph::Close,
+        }
+    }
+}
+
+/// The title bar, in client device pixels. The flat theme's runs edge to
+/// edge; the others sit inside the window frame.
 fn title_bar(cw: i32) -> RECT {
+    if theme() == Theme::Flat {
+        let t = line();
+        return rect_px(t, t, cw - t, px(FRAME + TITLE_H));
+    }
     rect_px(px(FRAME), px(FRAME), cw - px(FRAME), px(FRAME + TITLE_H))
 }
 
-/// Minimize, maximize and close buttons, in client device pixels.
-fn title_buttons(cw: i32) -> [RECT; 3] {
+/// The current theme's caption buttons, in client device pixels.
+fn title_buttons(cw: i32) -> Vec<(Caption, RECT)> {
     let tb = title_bar(cw);
-    let (bw, bh) = (px(20), px(18));
-    let top = tb.top + (tb.bottom - tb.top - bh) / 2;
-    let close = rect_px(tb.right - px(3) - bw, top, tb.right - px(3), top + bh);
-    let max = rect_px(close.left - px(2) - bw, top, close.left - px(2), top + bh);
-    let min = rect_px(max.left - bw, top, max.left, top + bh);
-    [min, max, close]
+    let bar_h = tb.bottom - tb.top;
+    match theme() {
+        Theme::Classic => {
+            let (bw, bh) = (px(20), px(18));
+            let top = tb.top + (bar_h - bh) / 2;
+            let close = rect_px(tb.right - px(3) - bw, top, tb.right - px(3), top + bh);
+            let max = rect_px(close.left - px(2) - bw, top, close.left - px(2), top + bh);
+            let min = rect_px(max.left - bw, top, max.left, top + bh);
+            vec![(Caption::Minimize, min), (Caption::Maximize, max), (Caption::Close, close)]
+        }
+        // Square buttons the height of the bar: the system-menu box on the
+        // left, minimize and maximize on the right.
+        Theme::Win31 => {
+            let sys = rect_px(tb.left, tb.top, tb.left + bar_h, tb.bottom);
+            let max = rect_px(tb.right - bar_h, tb.top, tb.right, tb.bottom);
+            let min = rect_px(max.left - bar_h, tb.top, max.left, tb.bottom);
+            vec![(Caption::SysMenu, sys), (Caption::Minimize, min), (Caption::Maximize, max)]
+        }
+        // Wide, full-height buttons; a fixed-size window shows no maximize.
+        Theme::Flat => {
+            let w = px(46);
+            let close = rect_px(tb.right - w, tb.top, tb.right, tb.bottom);
+            let min = rect_px(close.left - w, tb.top, close.left, tb.bottom);
+            vec![(Caption::Minimize, min), (Caption::Close, close)]
+        }
+        // Small boxes: close on the left; zoom, then collapse, on the right.
+        Theme::Platinum => {
+            let b = px(13);
+            let top = tb.top + (bar_h - b) / 2;
+            let close = rect_px(tb.left + px(6), top, tb.left + px(6) + b, top + b);
+            let collapse = rect_px(tb.right - px(6) - b, top, tb.right - px(6), top + b);
+            let zoom = rect_px(collapse.left - px(6) - b, top, collapse.left - px(6), top + b);
+            vec![(Caption::Close, close), (Caption::Maximize, zoom), (Caption::Minimize, collapse)]
+        }
+    }
 }
 
-/// A V/E language button. The active one is the orange "lit" button.
-unsafe fn lang_button(hdc: HDC, r: RECT, letter: &str, label: &str, active: bool, down: bool, f: &Fonts) {
-    let inner = if active {
-        // Heavy black outline, like a default button, around the lit face.
-        edge(hdc, r, BLACK, BLACK);
-        let inner = bevel(hdc, inset(r, line()), Bevel::Raised);
-        gradient(hdc, inner, ORANGE_TOP, ORANGE_BOTTOM, true);
-        inner
-    } else {
-        let inner = bevel(hdc, r, if down { Bevel::Pressed } else { Bevel::Raised });
-        fill_solid(hdc, inner, FACE);
-        inner
+/// The title bar: background, title and caption buttons.
+unsafe fn paint_title_bar(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(Region, RECT)>) {
+    let p = pal();
+    let t = line();
+    let tb = title_bar(cw);
+    let (c1, c2) = if v.active { p.title_active } else { p.title_inactive };
+    let color = if v.active { p.title_text } else { p.title_inactive_text };
+    gradient(hdc, tb, c1, c2, false);
+
+    // The free stretch of the bar between the buttons on either side.
+    let buttons = title_buttons(cw);
+    let (mut left, mut right) = (tb.left, tb.right);
+    for (_, r) in &buttons {
+        if r.right <= cw / 2 {
+            left = left.max(r.right);
+        } else {
+            right = right.min(r.left);
+        }
+    }
+
+    SelectObject(hdc, f.title);
+    let title = format!("NovaKey Settings - v{}", env!("CARGO_PKG_VERSION"));
+    match theme() {
+        Theme::Classic | Theme::Flat => {
+            let icon_sz = px(16);
+            let icon_x = left + px(if theme() == Theme::Flat { 10 } else { 4 });
+            draw_app_icon(hdc, icon_x, tb.top + (tb.bottom - tb.top - icon_sz) / 2, icon_sz);
+            draw_text(
+                hdc,
+                &title,
+                rect_px(icon_x + icon_sz + px(6), tb.top, right - px(4), tb.bottom),
+                color,
+                LEFT | DT_END_ELLIPSIS,
+            );
+        }
+        Theme::Win31 => {
+            draw_text(
+                hdc,
+                &title,
+                rect_px(left + px(4), tb.top, right - px(4), tb.bottom),
+                color,
+                CENTER | DT_END_ELLIPSIS,
+            );
+            fill_solid(hdc, rect_px(tb.left, tb.bottom, tb.right, tb.bottom + t), p.dark);
+        }
+        Theme::Platinum => {
+            let (l, r) = (left + px(6), right - px(6));
+            if v.active {
+                // Pinstripes: a ridge on every third line.
+                let mut y = tb.top + px(5);
+                while y + 2 * t <= tb.bottom - px(5) {
+                    fill_solid(hdc, rect_px(l, y, r, y + t), p.hilite);
+                    fill_solid(hdc, rect_px(l, y + t, r, y + 2 * t), p.shadow);
+                    y += 3 * t;
+                }
+            }
+            // The title sits on a plain patch cut out of the stripes.
+            let w = (text_width(hdc, &title) + px(16)).min(r - l);
+            let x = l + (r - l - w) / 2;
+            let patch = rect_px(x, tb.top, x + w, tb.bottom);
+            fill_solid(hdc, patch, c1);
+            draw_text(hdc, &title, patch, color, CENTER | DT_END_ELLIPSIS);
+            fill_solid(hdc, rect_px(tb.left, tb.bottom, tb.right, tb.bottom + t), p.shadow);
+        }
+    }
+
+    for (cap, r) in buttons {
+        let region = cap.region();
+        let down = region.is_some_and(|reg| v.is_down(reg));
+        caption_button(hdc, cap, r, down, v.active, f);
+        if let Some(reg) = region {
+            hits.push((reg, r));
+        }
+    }
+}
+
+/// One caption button in the current theme.
+unsafe fn caption_button(hdc: HDC, cap: Caption, r: RECT, down: bool, active: bool, f: &Fonts) {
+    let p = pal();
+    let t = line();
+    let enabled = cap.region().is_some();
+    SelectObject(hdc, f.glyph);
+    match theme() {
+        Theme::Classic => {
+            let inner = bevel(hdc, r, if down { Bevel::Pressed } else { Bevel::Raised });
+            fill_solid(hdc, inner, p.face);
+            let shift = if down { t } else { 0 };
+            let gr = offset(inner, shift, shift);
+            if enabled {
+                draw_text(hdc, glyph(cap.glyph()), gr, p.text, CENTER);
+            } else {
+                draw_text_disabled(hdc, glyph(cap.glyph()), gr, CENTER);
+            }
+        }
+        Theme::Win31 if cap == Caption::SysMenu => {
+            // A gray box holding the "space bar" handle, ruled off on its right.
+            fill_solid(hdc, r, if down { p.shadow } else { p.face });
+            fill_solid(hdc, rect_px(r.right - t, r.top, r.right, r.bottom), p.dark);
+            let w = (r.right - r.left) * 9 / 16;
+            let x = r.left + (r.right - r.left - t - w) / 2;
+            let y = (r.top + r.bottom) / 2 - px(2);
+            let bar = rect_px(x, y, x + w, y + px(4));
+            fill_solid(hdc, offset(bar, t, t), p.dark);
+            fill_solid(hdc, bar, p.hilite);
+            outline(hdc, bar, p.dark);
+        }
+        Theme::Win31 => {
+            // Arrow buttons, ruled off on their left: ▼ minimize, ▲ maximize.
+            fill_solid(hdc, rect_px(r.left, r.top, r.left + t, r.bottom), p.dark);
+            let body = rect_px(r.left + t, r.top, r.right, r.bottom);
+            let inner = if down {
+                edge(hdc, body, p.shadow, p.face);
+                inset(body, t)
+            } else {
+                edge(hdc, body, p.hilite, p.shadow);
+                edge(hdc, inset(body, t), p.hilite, p.shadow);
+                inset(body, 2 * t)
+            };
+            fill_solid(hdc, inner, p.face);
+            let g = if cap == Caption::Minimize { Glyph::Down } else { Glyph::Up };
+            let shift = if down { t } else { 0 };
+            let color = if enabled { p.text } else { p.disabled };
+            draw_text(hdc, glyph(g), offset(inner, shift, shift), color, CENTER);
+        }
+        Theme::Flat => {
+            let close = cap == Caption::Close;
+            if down {
+                fill_solid(hdc, r, if close { FLAT_CLOSE } else { p.light });
+            }
+            let color = if down && close {
+                WHITE
+            } else if active && enabled {
+                p.text
+            } else {
+                p.disabled
+            };
+            draw_text(hdc, glyph(cap.glyph()), r, color, CENTER);
+        }
+        Theme::Platinum => {
+            outline(hdc, r, p.dark);
+            let inner = inset(r, t);
+            if down {
+                fill_solid(hdc, inner, p.shadow);
+            } else {
+                edge(hdc, inner, p.hilite, p.shadow);
+                fill_solid(hdc, inset(inner, t), p.face);
+            }
+            let w = inner.right - inner.left;
+            match cap {
+                // Zoom: a small box in the top-left corner.
+                Caption::Maximize => outline(
+                    hdc,
+                    rect_px(inner.left + t, inner.top + t, inner.left + w * 3 / 5, inner.top + w * 3 / 5),
+                    p.dark,
+                ),
+                // Collapse (window shade): two bars across the middle.
+                Caption::Minimize => {
+                    let y = inner.top + w / 2;
+                    fill_solid(hdc, rect_px(inner.left + t, y - 2 * t, inner.right - t, y - t), p.dark);
+                    fill_solid(hdc, rect_px(inner.left + t, y + t, inner.right - t, y + 2 * t), p.dark);
+                }
+                Caption::Close | Caption::SysMenu => {}
+            }
+        }
+    }
+}
+
+/// A scroll-bar arrow button.
+unsafe fn scroll_arrow(hdc: HDC, r: RECT, g: Glyph, f: &Fonts) {
+    let p = pal();
+    SelectObject(hdc, f.glyph);
+    if theme() == Theme::Flat {
+        fill_solid(hdc, r, p.track);
+        draw_text(hdc, glyph(g), r, p.text2, CENTER);
+        return;
+    }
+    let inner = bevel(hdc, r, Bevel::Raised);
+    fill_solid(hdc, inner, p.face);
+    draw_text(hdc, glyph(g), inner, p.text, CENTER);
+}
+
+/// The scroll-bar thumb.
+unsafe fn scroll_thumb(hdc: HDC, r: RECT) {
+    let p = pal();
+    let t = line();
+    match theme() {
+        Theme::Classic | Theme::Win31 => {
+            let inner = bevel(hdc, r, Bevel::Raised);
+            fill_solid(hdc, inner, p.face);
+        }
+        // A slim bar.
+        Theme::Flat => fill_solid(
+            hdc,
+            rect_px(r.left + px(5), r.top + px(2), r.right - px(5), r.bottom - px(2)),
+            p.dark,
+        ),
+        // Lavender, with three grip ridges in the middle.
+        Theme::Platinum => {
+            outline(hdc, r, p.dark);
+            let inner = inset(r, t);
+            edge(hdc, inner, PLAT_THUMB_LIGHT, p.accent);
+            fill_solid(hdc, inset(inner, t), PLAT_THUMB);
+            let mid = (r.top + r.bottom) / 2;
+            for i in -1..=1 {
+                let y = mid + i * 3 * t - t;
+                fill_solid(hdc, rect_px(r.left + px(4), y, r.right - px(4), y + t), p.hilite);
+                fill_solid(hdc, rect_px(r.left + px(4), y + t, r.right - px(4), y + 2 * t), p.accent);
+            }
+        }
+    }
+}
+
+/// A drop-down field showing `text`, drawn pressed while its menu opens.
+unsafe fn combo(hdc: HDC, r: RECT, text: &str, down: bool, f: &Fonts) {
+    let p = pal();
+    let t = line();
+    let arrow_w = px(18);
+    let (text_r, arrow_r) = match theme() {
+        // A sunken field with a push button holding the arrow.
+        Theme::Classic | Theme::Win31 => {
+            let inner = bevel(hdc, r, Bevel::Sunken);
+            fill_solid(hdc, inner, p.field);
+            let btn = rect_px(inner.right - arrow_w, inner.top, inner.right, inner.bottom);
+            let face = bevel(hdc, btn, if down { Bevel::Pressed } else { Bevel::Raised });
+            fill_solid(hdc, face, p.face);
+            let shift = if down { t } else { 0 };
+            (rect_px(inner.left, inner.top, btn.left, inner.bottom), offset(face, shift, shift))
+        }
+        Theme::Flat => {
+            fill_solid(hdc, r, if down { p.bg } else { p.field });
+            outline(hdc, r, p.shadow);
+            let inner = inset(r, t);
+            (
+                rect_px(inner.left, inner.top, inner.right - arrow_w, inner.bottom),
+                rect_px(inner.right - arrow_w - px(4), inner.top, inner.right - px(4), inner.bottom),
+            )
+        }
+        // A pop-up menu button: rounded, the arrow set off by a divider.
+        Theme::Platinum => {
+            round_rect(hdc, r, p.dark, if down { p.shadow } else { p.face }, px(8));
+            let div = r.right - arrow_w - px(4);
+            fill_solid(hdc, rect_px(div, r.top + px(4), div + t, r.bottom - px(4)), p.shadow);
+            (rect_px(r.left, r.top, div, r.bottom), rect_px(div + t, r.top, r.right - px(2), r.bottom))
+        }
     };
-    let shift = if down && !active { line() } else { 0 };
-    let inner = offset(inner, shift, shift);
+    SelectObject(hdc, f.body);
+    draw_text(hdc, text, pad_x(text_r, px(8)), p.text, LEFT | DT_END_ELLIPSIS);
+    SelectObject(hdc, f.glyph);
+    let arrow_color = if theme() == Theme::Flat { p.text2 } else { p.text };
+    draw_text(hdc, glyph(Glyph::Down), arrow_r, arrow_color, CENTER);
+}
+
+/// A V/E language button. The active one is lit: orange in the classic
+/// theme, the accent color in the others.
+unsafe fn lang_button(hdc: HDC, r: RECT, letter: &str, label: &str, active: bool, down: bool, f: &Fonts) {
+    let p = pal();
+    let t = line();
+    // Paint the button; keep its face rect and the label, badge, badge-edge
+    // and badge-letter colors.
+    let (inner, label_color, badge_fill, badge_edge, letter_color) = match (theme(), active) {
+        (Theme::Classic, true) => {
+            // Heavy black outline, like a default button, around the lit face.
+            edge(hdc, r, BLACK, BLACK);
+            let inner = bevel(hdc, inset(r, t), Bevel::Raised);
+            gradient(hdc, inner, ORANGE_TOP, ORANGE_BOTTOM, true);
+            (inner, WHITE, BLACK, WHITE, WHITE)
+        }
+        (Theme::Win31, true) => {
+            // A doubled outline around the highlight color.
+            outline(hdc, r, p.dark);
+            outline(hdc, inset(r, t), p.dark);
+            let inner = inset(r, 2 * t);
+            fill_solid(hdc, inner, p.accent);
+            round_corners(hdc, r, p.bg);
+            (inner, WHITE, WHITE, p.dark, p.accent)
+        }
+        (Theme::Flat, true) => {
+            fill_solid(hdc, r, p.accent);
+            (r, WHITE, WHITE, WHITE, p.accent)
+        }
+        (Theme::Platinum, true) => {
+            round_rect(hdc, r, p.dark, p.accent, px(8));
+            (r, WHITE, WHITE, p.dark, p.accent)
+        }
+        (Theme::Classic | Theme::Win31, false) => {
+            let inner = bevel(hdc, r, if down { Bevel::Pressed } else { Bevel::Raised });
+            fill_solid(hdc, inner, p.face);
+            if theme() == Theme::Win31 {
+                round_corners(hdc, r, p.bg);
+            }
+            let shift = if down { t } else { 0 };
+            (offset(inner, shift, shift), p.text, p.shadow, p.text2, WHITE)
+        }
+        (Theme::Flat, false) => {
+            fill_solid(hdc, r, if down { p.bg } else { p.face });
+            outline(hdc, r, p.shadow);
+            (inset(r, t), p.text, p.text2, p.text2, WHITE)
+        }
+        (Theme::Platinum, false) => {
+            round_rect(hdc, r, p.dark, if down { p.shadow } else { p.face }, px(8));
+            (r, p.text, p.text2, p.text2, WHITE)
+        }
+    };
 
     // Letter badge + label, centered together.
     SelectObject(hdc, f.lang);
@@ -1505,21 +2016,16 @@ unsafe fn lang_button(hdc: HDC, r: RECT, letter: &str, label: &str, active: bool
     let x = inner.left + (inner.right - inner.left - total) / 2;
     let by = inner.top + (inner.bottom - inner.top - badge) / 2;
     let b = rect_px(x, by, x + badge, by + badge);
-    if active {
-        fill_solid(hdc, b, BLACK);
-        edge(hdc, b, WHITE, WHITE);
-    } else {
-        fill_solid(hdc, b, SHADOW);
-        edge(hdc, b, TEXT2, TEXT2);
-    }
+    fill_solid(hdc, b, badge_fill);
+    edge(hdc, b, badge_edge, badge_edge);
     SelectObject(hdc, f.badge);
-    draw_text(hdc, letter, b, WHITE, CENTER);
+    draw_text(hdc, letter, b, letter_color, CENTER);
     SelectObject(hdc, f.lang);
     draw_text(
         hdc,
         label,
         rect_px(b.right + gap, inner.top, inner.right, inner.bottom),
-        if active { WHITE } else { TEXT },
+        label_color,
         LEFT,
     );
 }
@@ -1535,6 +2041,7 @@ unsafe fn checkbox_row(
     state: (bool, bool, bool),
     f: &Fonts,
 ) -> RECT {
+    let p = pal();
     let (x, right, cy) = pos;
     let (checked, enabled, down) = state;
     let row_h = if caption.is_some() { CAPTIONED_ROW_H } else { CHECK_ROW_H };
@@ -1545,7 +2052,7 @@ unsafe fn checkbox_row(
     SelectObject(hdc, if caption.is_some() { f.bold } else { f.body });
     let lr = rect(x + 26, cy, right, cy + label_h);
     if enabled {
-        draw_text(hdc, label, lr, TEXT, LEFT | DT_END_ELLIPSIS);
+        draw_text(hdc, label, lr, p.text, LEFT | DT_END_ELLIPSIS);
     } else {
         draw_text_disabled(hdc, label, lr, LEFT | DT_END_ELLIPSIS);
     }
@@ -1553,7 +2060,7 @@ unsafe fn checkbox_row(
         SelectObject(hdc, f.small);
         let cr = rect(x + 26, cy + label_h, right, cy + row_h);
         if enabled {
-            draw_text(hdc, caption, cr, TEXT2, LEFT | DT_END_ELLIPSIS);
+            draw_text(hdc, caption, cr, p.text2, LEFT | DT_END_ELLIPSIS);
         } else {
             draw_text_disabled(hdc, caption, cr, LEFT | DT_END_ELLIPSIS);
         }
@@ -1561,73 +2068,215 @@ unsafe fn checkbox_row(
     rect(x, cy, right, cy + row_h)
 }
 
-/// A sunken check box: blue with a check when on, face-gray while pressed or
-/// disabled.
+/// A check box, on or off, held down or disabled.
 unsafe fn checkbox(hdc: HDC, r: RECT, checked: bool, enabled: bool, down: bool) {
-    let inner = bevel(hdc, r, Bevel::Sunken);
-    let fill = if !enabled || down {
-        FACE
-    } else if checked {
-        CHECK_BLUE
-    } else {
-        WHITE
-    };
-    fill_solid(hdc, inner, fill);
-    if !checked {
-        return;
+    let p = pal();
+    let t = line();
+    match theme() {
+        // Sunken: blue with a check when on, face-gray while pressed or
+        // disabled.
+        Theme::Classic => {
+            let inner = bevel(hdc, r, Bevel::Sunken);
+            let fill = if !enabled || down {
+                p.face
+            } else if checked {
+                p.accent
+            } else {
+                p.field
+            };
+            fill_solid(hdc, inner, fill);
+            if !checked {
+                return;
+            }
+            let pts = tick_points(inner);
+            if enabled && !down {
+                // Black tick with a white halo, readable on the blue.
+                stroke(hdc, &pts, WHITE, px(4).max(3));
+                stroke(hdc, &pts, BLACK, px(2).max(2));
+            } else {
+                stroke(hdc, &pts, if enabled { BLACK } else { p.shadow }, px(2).max(2));
+            }
+        }
+        // A black square, crossed when on, its border doubled while held.
+        Theme::Win31 => {
+            outline(hdc, r, if enabled { p.dark } else { p.shadow });
+            let inner = inset(r, t);
+            fill_solid(hdc, inner, p.field);
+            if down {
+                outline(hdc, inner, p.dark);
+            }
+            if checked {
+                let color = if enabled { p.dark } else { p.shadow };
+                let i = inset(inner, t);
+                stroke(hdc, &[POINT { x: i.left, y: i.top }, POINT { x: i.right, y: i.bottom }], color, t);
+                stroke(
+                    hdc,
+                    &[POINT { x: i.left, y: i.bottom - 1 }, POINT { x: i.right, y: i.top - 1 }],
+                    color,
+                    t,
+                );
+            }
+        }
+        // Outlined when off; filled with the accent and a white tick when on.
+        Theme::Flat => {
+            let (fill, border) = if !enabled {
+                (if checked { p.shadow } else { p.bg }, p.shadow)
+            } else if checked {
+                let c = if down { FLAT_ACCENT_DOWN } else { p.accent };
+                (c, c)
+            } else {
+                (if down { p.light } else { p.field }, p.dark)
+            };
+            fill_solid(hdc, r, fill);
+            outline(hdc, r, border);
+            if checked {
+                stroke(hdc, &tick_points(inset(r, t)), WHITE, px(2).max(2));
+            }
+        }
+        // A softly beveled square with a black tick.
+        Theme::Platinum => {
+            outline(hdc, r, if enabled { p.dark } else { p.shadow });
+            let inner = inset(r, t);
+            if down {
+                fill_solid(hdc, inner, p.shadow);
+            } else {
+                edge(hdc, inner, p.hilite, p.shadow);
+                fill_solid(hdc, inset(inner, t), p.light);
+            }
+            if checked {
+                let color = if enabled { BLACK } else { p.shadow };
+                stroke(hdc, &tick_points(inner), color, px(2).max(2));
+            }
+        }
     }
-    let (l, t) = (inner.left, inner.top);
-    let w = inner.right - inner.left;
-    let pts = [
+}
+
+/// The three points of a check mark inside `r`.
+fn tick_points(r: RECT) -> [POINT; 3] {
+    let (l, t) = (r.left, r.top);
+    let w = r.right - r.left;
+    [
         POINT { x: l + w * 20 / 100, y: t + w * 50 / 100 },
         POINT { x: l + w * 42 / 100, y: t + w * 72 / 100 },
         POINT { x: l + w * 82 / 100, y: t + w * 26 / 100 },
-    ];
-    if enabled && !down {
-        // Black tick with a white halo, readable on the blue.
-        stroke(hdc, &pts, WHITE, px(4).max(3));
-        stroke(hdc, &pts, BLACK, px(2).max(2));
-    } else {
-        stroke(hdc, &pts, if enabled { BLACK } else { SHADOW }, px(2).max(2));
-    }
+    ]
 }
 
-/// A classic push button. `default` adds the heavy black outline of the
-/// dialog's default button.
+/// A push button. `default` marks the dialog's default button (a heavy
+/// outline, the accent color, or the Platinum default ring).
 unsafe fn push_button(hdc: HDC, r: RECT, label: &str, font: HFONT, down: bool, default: bool) {
-    let mut r = r;
-    if default {
-        edge(hdc, r, BLACK, BLACK);
-        r = inset(r, line());
-    }
-    let inner = bevel(hdc, r, if down { Bevel::Pressed } else { Bevel::Raised });
-    fill_solid(hdc, inner, FACE);
+    let p = pal();
+    let t = line();
     SelectObject(hdc, font);
-    let shift = if down { line() } else { 0 };
-    draw_text(hdc, label, offset(inner, shift, shift), TEXT, CENTER);
+    match theme() {
+        Theme::Classic | Theme::Win31 => {
+            let mut face = r;
+            if default {
+                outline(hdc, face, p.dark);
+                face = inset(face, t);
+            }
+            let inner = bevel(hdc, face, if down { Bevel::Pressed } else { Bevel::Raised });
+            fill_solid(hdc, inner, p.face);
+            if theme() == Theme::Win31 {
+                round_corners(hdc, r, p.bg);
+            }
+            let shift = if down { t } else { 0 };
+            draw_text(hdc, label, offset(inner, shift, shift), p.text, CENTER);
+        }
+        Theme::Flat => {
+            let (fill, border, color) = match (default, down) {
+                (true, false) => (p.accent, p.accent, WHITE),
+                (true, true) => (FLAT_ACCENT_DOWN, FLAT_ACCENT_DOWN, WHITE),
+                (false, false) => (p.face, p.shadow, p.text),
+                (false, true) => (p.bg, p.shadow, p.text2),
+            };
+            fill_solid(hdc, r, fill);
+            outline(hdc, r, border);
+            draw_text(hdc, label, r, color, CENTER);
+        }
+        Theme::Platinum => {
+            let mut face = r;
+            if default {
+                round_rect(hdc, face, p.dark, p.shadow, px(12));
+                face = inset(face, px(3));
+            }
+            // Held down, the button darkens and its label turns white.
+            let (fill, color) = if down { (p.text2, WHITE) } else { (p.face, p.text) };
+            round_rect(hdc, face, p.dark, fill, px(8));
+            if !down {
+                // Soft highlight and shadow inside the top and bottom edges.
+                let (l, rr) = (face.left + px(4), face.right - px(4));
+                fill_solid(hdc, rect_px(l, face.top + t, rr, face.top + 2 * t), p.hilite);
+                fill_solid(hdc, rect_px(l, face.bottom - 2 * t, rr, face.bottom - t), p.shadow);
+            }
+            draw_text(hdc, label, face, color, CENTER);
+        }
+    }
 }
 
-/// An etched group box with its label set into the top edge (`r` in layout
-/// units; the label sits on the first 16 units, the border at its middle).
-unsafe fn group_box(hdc: HDC, r: RECT, label: &str, font: HFONT) {
-    let t = line();
-    let frame = rect(r.left, r.top + 8, r.right, r.bottom);
-    outline(hdc, offset(frame, t, t), WHITE);
-    outline(hdc, rect_px(frame.left, frame.top, frame.right - t, frame.bottom - t), SHADOW);
+/// The chosen button of a segmented choice (the app-scope modes).
+unsafe fn selected_button(hdc: HDC, r: RECT, label: &str, f: &Fonts) {
+    let p = pal();
+    match theme() {
+        // Stays pushed in, with a bullet.
+        Theme::Classic => {
+            let inner = bevel(hdc, r, Bevel::Sunken);
+            fill_solid(hdc, inner, SELECTED);
+            SelectObject(hdc, f.bold);
+            draw_text(hdc, &format!("• {label}"), offset(inner, line(), line()), p.text, CENTER);
+        }
+        Theme::Win31 => push_button(hdc, r, &format!("• {label}"), f.bold, true, false),
+        Theme::Flat => {
+            fill_solid(hdc, r, p.accent);
+            SelectObject(hdc, f.bold);
+            draw_text(hdc, label, r, WHITE, CENTER);
+        }
+        Theme::Platinum => push_button(hdc, r, label, f.bold, true, false),
+    }
+}
 
+/// A group box with its label (`r` in layout units). Etched with the label
+/// set into the top edge (classic, Platinum), a black outline (Windows 3.1),
+/// or a white card with the label inside (flat).
+unsafe fn group_box(hdc: HDC, r: RECT, label: &str, font: HFONT) {
+    let p = pal();
+    let t = line();
     SelectObject(hdc, font);
+    if theme() == Theme::Flat {
+        let card = rect(r.left, r.top, r.right, r.bottom);
+        fill_solid(hdc, card, p.field);
+        outline(hdc, card, p.light);
+        draw_text(hdc, label, rect(r.left + 12, r.top + 4, r.right - 12, r.top + 20), p.heading, LEFT);
+        return;
+    }
+
+    // The label sits on the first 16 units, the border at its middle.
+    let frame = rect(r.left, r.top + 8, r.right, r.bottom);
+    if theme() == Theme::Win31 {
+        outline(hdc, frame, p.dark);
+    } else {
+        outline(hdc, offset(frame, t, t), p.hilite);
+        outline(hdc, rect_px(frame.left, frame.top, frame.right - t, frame.bottom - t), p.shadow);
+    }
     let lx = px(r.left + 10);
     let w = text_width(hdc, label);
     let lr = rect_px(lx, px(r.top), lx + w + px(8), px(r.top + 16));
-    fill_solid(hdc, lr, FACE);
-    draw_text(hdc, label, lr, NAVY, CENTER);
+    fill_solid(hdc, lr, p.bg);
+    draw_text(hdc, label, lr, p.heading, CENTER);
 }
 
-/// A horizontal etched separator along the top of `r` (device pixels).
+/// A horizontal separator along the top of `r` (device pixels).
 unsafe fn etched_line(hdc: HDC, r: RECT) {
+    let p = pal();
     let t = line();
-    fill_solid(hdc, rect_px(r.left, r.top, r.right, r.top + t), SHADOW);
-    fill_solid(hdc, rect_px(r.left, r.top + t, r.right, r.top + 2 * t), WHITE);
+    match theme() {
+        Theme::Classic | Theme::Platinum => {
+            fill_solid(hdc, rect_px(r.left, r.top, r.right, r.top + t), p.shadow);
+            fill_solid(hdc, rect_px(r.left, r.top + t, r.right, r.top + 2 * t), p.hilite);
+        }
+        Theme::Win31 => fill_solid(hdc, rect_px(r.left, r.top, r.right, r.top + t), p.shadow),
+        Theme::Flat => fill_solid(hdc, rect_px(r.left, r.top, r.right, r.top + t), p.light),
+    }
 }
 
 unsafe fn draw_app_icon(hdc: HDC, x: i32, y: i32, size: i32) {
@@ -1642,30 +2291,176 @@ unsafe fn draw_app_icon(hdc: HDC, x: i32, y: i32, size: i32) {
     let _ = DestroyIcon(icon);
 }
 
-// MARK: - GDI helpers
+// MARK: - Themes
 
-const FACE: COLORREF = rgb(192, 192, 192);
-const LIGHT: COLORREF = rgb(223, 223, 223);
+/// A theme's colors. Where themes differ in shape rather than color, the
+/// painters above match on `theme()`.
+struct Palette {
+    /// Dialog background.
+    bg: COLORREF,
+    /// Button face.
+    face: COLORREF,
+    /// Bevel and border colors, lightest to darkest.
+    hilite: COLORREF,
+    light: COLORREF,
+    shadow: COLORREF,
+    dark: COLORREF,
+    text: COLORREF,
+    /// Captions and hints.
+    text2: COLORREF,
+    disabled: COLORREF,
+    /// Group-box labels.
+    heading: COLORREF,
+    /// The shortcut field and the status-bar language.
+    accent_text: COLORREF,
+    /// The lit language button, the chosen app scope, a checked box.
+    accent: COLORREF,
+    danger: COLORREF,
+    warn: COLORREF,
+    /// The shortcut panel.
+    panel: COLORREF,
+    /// Text fields and the app list.
+    field: COLORREF,
+    /// The read-only app-scope caption.
+    field_soft: COLORREF,
+    /// Scroll-bar track.
+    track: COLORREF,
+    /// Title bar gradients (left, right) and text, active and inactive.
+    title_active: (COLORREF, COLORREF),
+    title_inactive: (COLORREF, COLORREF),
+    title_text: COLORREF,
+    title_inactive_text: COLORREF,
+}
+
+static CLASSIC: Palette = Palette {
+    bg: rgb(192, 192, 192),
+    face: rgb(192, 192, 192),
+    hilite: rgb(255, 255, 255),
+    light: rgb(223, 223, 223),
+    shadow: rgb(128, 128, 128),
+    dark: rgb(0, 0, 0),
+    text: rgb(0, 0, 0),
+    text2: rgb(88, 88, 88),
+    disabled: rgb(128, 128, 128),
+    heading: rgb(0, 0, 128),
+    accent_text: rgb(0, 0, 128),
+    accent: rgb(32, 96, 232),
+    danger: rgb(176, 0, 0),
+    warn: rgb(128, 80, 0),
+    panel: rgb(180, 180, 180),
+    field: rgb(255, 255, 255),
+    field_soft: rgb(236, 236, 236),
+    track: rgb(224, 224, 224),
+    title_active: (rgb(0, 0, 128), rgb(16, 132, 208)),
+    title_inactive: (rgb(128, 128, 128), rgb(181, 181, 181)),
+    title_text: rgb(255, 255, 255),
+    title_inactive_text: rgb(212, 208, 200),
+};
+
+/// Windows 3.1's default scheme, within its 16-color palette.
+static WIN31: Palette = Palette {
+    bg: rgb(255, 255, 255),
+    face: rgb(192, 192, 192),
+    hilite: rgb(255, 255, 255),
+    light: rgb(255, 255, 255),
+    shadow: rgb(128, 128, 128),
+    dark: rgb(0, 0, 0),
+    text: rgb(0, 0, 0),
+    text2: rgb(128, 128, 128),
+    disabled: rgb(128, 128, 128),
+    heading: rgb(0, 0, 0),
+    accent_text: rgb(0, 0, 128),
+    accent: rgb(0, 0, 128),
+    danger: rgb(128, 0, 0),
+    warn: rgb(128, 128, 0),
+    panel: rgb(255, 255, 255),
+    field: rgb(255, 255, 255),
+    field_soft: rgb(255, 255, 255),
+    track: rgb(192, 192, 192),
+    title_active: (rgb(0, 0, 128), rgb(0, 0, 128)),
+    title_inactive: (rgb(255, 255, 255), rgb(255, 255, 255)),
+    title_text: rgb(255, 255, 255),
+    title_inactive_text: rgb(0, 0, 0),
+};
+
+/// Windows 10/11 light: a soft gray window, white cards, blue accent.
+static FLAT: Palette = Palette {
+    bg: rgb(243, 243, 243),
+    face: rgb(251, 251, 251),
+    hilite: rgb(255, 255, 255),
+    light: rgb(229, 229, 229),
+    shadow: rgb(204, 204, 204),
+    dark: rgb(134, 134, 134),
+    text: rgb(26, 26, 26),
+    text2: rgb(96, 96, 96),
+    disabled: rgb(160, 160, 160),
+    heading: rgb(26, 26, 26),
+    accent_text: rgb(0, 95, 184),
+    accent: rgb(0, 103, 192),
+    danger: rgb(196, 43, 28),
+    warn: rgb(157, 93, 0),
+    panel: rgb(249, 249, 249),
+    field: rgb(255, 255, 255),
+    field_soft: rgb(249, 249, 249),
+    track: rgb(240, 240, 240),
+    title_active: (rgb(243, 243, 243), rgb(243, 243, 243)),
+    title_inactive: (rgb(243, 243, 243), rgb(243, 243, 243)),
+    title_text: rgb(26, 26, 26),
+    title_inactive_text: rgb(150, 150, 150),
+};
+
+/// Mac OS 9 Platinum: light gray, soft bevels, lavender highlights.
+static PLATINUM: Palette = Palette {
+    bg: rgb(221, 221, 221),
+    face: rgb(221, 221, 221),
+    hilite: rgb(255, 255, 255),
+    light: rgb(238, 238, 238),
+    shadow: rgb(136, 136, 136),
+    dark: rgb(51, 51, 51),
+    text: rgb(0, 0, 0),
+    text2: rgb(85, 85, 85),
+    disabled: rgb(153, 153, 153),
+    heading: rgb(0, 0, 0),
+    accent_text: rgb(51, 51, 153),
+    accent: rgb(102, 102, 204),
+    danger: rgb(204, 0, 0),
+    warn: rgb(153, 102, 0),
+    panel: rgb(204, 204, 204),
+    field: rgb(255, 255, 255),
+    field_soft: rgb(238, 238, 238),
+    track: rgb(187, 187, 187),
+    title_active: (rgb(221, 221, 221), rgb(221, 221, 221)),
+    title_inactive: (rgb(221, 221, 221), rgb(221, 221, 221)),
+    title_text: rgb(0, 0, 0),
+    title_inactive_text: rgb(136, 136, 136),
+};
+
+/// The current theme's colors.
+fn pal() -> &'static Palette {
+    match theme() {
+        Theme::Classic => &CLASSIC,
+        Theme::Win31 => &WIN31,
+        Theme::Flat => &FLAT,
+        Theme::Platinum => &PLATINUM,
+    }
+}
+
+// Colors used by one theme only.
 const WHITE: COLORREF = rgb(255, 255, 255);
-const SHADOW: COLORREF = rgb(128, 128, 128);
 const BLACK: COLORREF = rgb(0, 0, 0);
-const TEXT: COLORREF = rgb(0, 0, 0);
-const TEXT2: COLORREF = rgb(88, 88, 88);
-const NAVY: COLORREF = rgb(0, 0, 128);
-const DANGER: COLORREF = rgb(176, 0, 0);
-const WARN: COLORREF = rgb(128, 80, 0);
-const PANEL: COLORREF = rgb(180, 180, 180);
+/// Classic: the chosen app-scope button.
 const SELECTED: COLORREF = rgb(172, 172, 172);
-const FIELD_SOFT: COLORREF = rgb(236, 236, 236);
-const TRACK: COLORREF = rgb(224, 224, 224);
-const CHECK_BLUE: COLORREF = rgb(32, 96, 232);
+/// Classic: the lit language button.
 const ORANGE_TOP: COLORREF = rgb(244, 146, 62);
 const ORANGE_BOTTOM: COLORREF = rgb(212, 98, 22);
-const TITLE_A1: COLORREF = rgb(0, 0, 128);
-const TITLE_A2: COLORREF = rgb(16, 132, 208);
-const TITLE_I1: COLORREF = rgb(128, 128, 128);
-const TITLE_I2: COLORREF = rgb(181, 181, 181);
-const TITLE_I_TEXT: COLORREF = rgb(212, 208, 200);
+/// Flat: the accent while pressed, and the close button while pressed.
+const FLAT_ACCENT_DOWN: COLORREF = rgb(0, 90, 158);
+const FLAT_CLOSE: COLORREF = rgb(196, 43, 28);
+/// Platinum: the lavender scroll thumb.
+const PLAT_THUMB: COLORREF = rgb(204, 204, 255);
+const PLAT_THUMB_LIGHT: COLORREF = rgb(238, 238, 255);
+
+// MARK: - GDI helpers
 
 const LEFT: DRAW_TEXT_FORMAT = DRAW_TEXT_FORMAT(DT_LEFT.0 | DT_SINGLELINE.0 | DT_VCENTER.0);
 const CENTER: DRAW_TEXT_FORMAT = DRAW_TEXT_FORMAT(DT_CENTER.0 | DT_SINGLELINE.0 | DT_VCENTER.0);
@@ -1707,10 +2502,13 @@ fn pad_x(r: RECT, d: i32) -> RECT {
     rect_px(r.left + d, r.top, r.right - d, r.bottom)
 }
 
-/// A font scaled to the current DPI.
+/// A font scaled to the current DPI; unsmoothed in the Windows 3.1 theme,
+/// whose screen fonts were bitmaps.
 unsafe fn font(face: &str, height: i32, weight: i32, italic: bool) -> HFONT {
     let face = wide(face);
-    // charset=DEFAULT(1), out/clip precis=0, quality=CLEARTYPE(5), pitch=DEFAULT(0).
+    let quality = if theme() == Theme::Win31 { 3 } else { 5 };
+    // charset=DEFAULT(1), out/clip precis=0, quality=CLEARTYPE(5) or
+    // NONANTIALIASED(3), pitch=DEFAULT(0).
     CreateFontW(
         px(height),
         0,
@@ -1723,7 +2521,7 @@ unsafe fn font(face: &str, height: i32, weight: i32, italic: bool) -> HFONT {
         1,
         0,
         0,
-        5,
+        quality,
         0,
         PCWSTR(face.as_ptr()),
     )
@@ -1746,10 +2544,13 @@ unsafe fn draw_text(hdc: HDC, s: &str, mut r: RECT, color: COLORREF, fmt: DRAW_T
     DrawTextW(hdc, &mut buf, &mut r, fmt | DT_NOPREFIX);
 }
 
-/// Classic disabled text: gray, embossed with a white copy one line down-right.
+/// Disabled text: gray, embossed with a white copy one line down-right in
+/// the classic theme.
 unsafe fn draw_text_disabled(hdc: HDC, s: &str, r: RECT, fmt: DRAW_TEXT_FORMAT) {
-    draw_text(hdc, s, offset(r, line(), line()), WHITE, fmt);
-    draw_text(hdc, s, r, SHADOW, fmt);
+    if theme() == Theme::Classic {
+        draw_text(hdc, s, offset(r, line(), line()), WHITE, fmt);
+    }
+    draw_text(hdc, s, r, pal().disabled, fmt);
 }
 
 /// Width of `s` in the currently selected font, in device pixels.
@@ -1780,6 +2581,36 @@ unsafe fn outline(hdc: HDC, r: RECT, color: COLORREF) {
     edge(hdc, r, color, color);
 }
 
+/// A border `w` pixels wide just inside `r`.
+unsafe fn ring(hdc: HDC, r: RECT, w: i32, color: COLORREF) {
+    fill_solid(hdc, rect_px(r.left, r.top, r.right, r.top + w), color);
+    fill_solid(hdc, rect_px(r.left, r.bottom - w, r.right, r.bottom), color);
+    fill_solid(hdc, rect_px(r.left, r.top, r.left + w, r.bottom), color);
+    fill_solid(hdc, rect_px(r.right - w, r.top, r.right, r.bottom), color);
+}
+
+/// Clip the four corner pixels of `r` to `color` (Windows 3.1 buttons).
+unsafe fn round_corners(hdc: HDC, r: RECT, color: COLORREF) {
+    let t = line();
+    for (x, y) in [(r.left, r.top), (r.right - t, r.top), (r.left, r.bottom - t), (r.right - t, r.bottom - t)] {
+        fill_solid(hdc, rect_px(x, y, x + t, y + t), color);
+    }
+}
+
+/// A filled rounded rectangle with a one-line border. GDI draws it
+/// unsmoothed, which suits the Platinum look.
+unsafe fn round_rect(hdc: HDC, r: RECT, border: COLORREF, fill: COLORREF, radius: i32) {
+    let pen = CreatePen(PS_INSIDEFRAME, line(), border);
+    let brush = CreateSolidBrush(fill);
+    let old_pen = SelectObject(hdc, pen);
+    let old_brush = SelectObject(hdc, brush);
+    let _ = RoundRect(hdc, r.left, r.top, r.right, r.bottom, radius, radius);
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    let _ = DeleteObject(pen);
+    let _ = DeleteObject(brush);
+}
+
 #[derive(Clone, Copy)]
 enum Bevel {
     /// A push button or scroll-bar part.
@@ -1794,22 +2625,86 @@ enum Bevel {
     Thin,
 }
 
-/// Draw a 3D border on `r` and return the area inside it.
+/// Draw a border of `kind` on `r` in the current theme and return the area
+/// inside it.
 unsafe fn bevel(hdc: HDC, r: RECT, kind: Bevel) -> RECT {
+    let p = pal();
     let t = line();
-    let ((o_tl, o_br), (i_tl, i_br)) = match kind {
-        Bevel::Raised => ((WHITE, BLACK), (LIGHT, SHADOW)),
-        Bevel::Pressed => ((BLACK, BLACK), (SHADOW, SHADOW)),
-        Bevel::Sunken => ((SHADOW, WHITE), (BLACK, LIGHT)),
-        Bevel::Window => ((LIGHT, BLACK), (WHITE, SHADOW)),
-        Bevel::Thin => {
-            edge(hdc, r, SHADOW, WHITE);
-            return inset(r, t);
+    match theme() {
+        Theme::Classic => {
+            let ((o_tl, o_br), (i_tl, i_br)) = match kind {
+                Bevel::Raised => ((p.hilite, p.dark), (p.light, p.shadow)),
+                Bevel::Pressed => ((p.dark, p.dark), (p.shadow, p.shadow)),
+                Bevel::Sunken => ((p.shadow, p.hilite), (p.dark, p.light)),
+                Bevel::Window => ((p.light, p.dark), (p.hilite, p.shadow)),
+                Bevel::Thin => {
+                    edge(hdc, r, p.shadow, p.hilite);
+                    return inset(r, t);
+                }
+            };
+            edge(hdc, r, o_tl, o_br);
+            edge(hdc, inset(r, t), i_tl, i_br);
+            inset(r, 2 * t)
         }
-    };
-    edge(hdc, r, o_tl, o_br);
-    edge(hdc, inset(r, t), i_tl, i_br);
-    inset(r, 2 * t)
+        Theme::Win31 => match kind {
+            // A black outline around a two-line highlight/shadow bevel.
+            Bevel::Raised => {
+                outline(hdc, r, p.dark);
+                edge(hdc, inset(r, t), p.hilite, p.shadow);
+                edge(hdc, inset(r, 2 * t), p.hilite, p.shadow);
+                inset(r, 3 * t)
+            }
+            // Held down, the bevel flattens to a shadow along the top and left.
+            Bevel::Pressed => {
+                outline(hdc, r, p.dark);
+                fill_solid(hdc, inset(r, t), p.face);
+                edge(hdc, inset(r, t), p.shadow, p.face);
+                inset(r, 3 * t)
+            }
+            Bevel::Sunken => {
+                outline(hdc, r, p.dark);
+                inset(r, t)
+            }
+            Bevel::Thin => {
+                outline(hdc, r, p.shadow);
+                inset(r, t)
+            }
+            // Black lines either side of a gray band, filling the frame.
+            Bevel::Window => {
+                let band = px(FRAME) - 2 * t;
+                outline(hdc, r, p.dark);
+                ring(hdc, inset(r, t), band, p.face);
+                outline(hdc, inset(r, t + band), p.dark);
+                inset(r, px(FRAME))
+            }
+        },
+        // Flat: a single line.
+        Theme::Flat => {
+            outline(hdc, r, if matches!(kind, Bevel::Thin) { p.light } else { p.shadow });
+            inset(r, t)
+        }
+        Theme::Platinum => match kind {
+            Bevel::Raised | Bevel::Window => {
+                outline(hdc, r, p.dark);
+                edge(hdc, inset(r, t), p.hilite, p.shadow);
+                inset(r, 2 * t)
+            }
+            Bevel::Pressed => {
+                outline(hdc, r, p.dark);
+                edge(hdc, inset(r, t), p.shadow, p.light);
+                inset(r, 2 * t)
+            }
+            Bevel::Sunken => {
+                edge(hdc, r, p.shadow, p.hilite);
+                edge(hdc, inset(r, t), p.dark, p.light);
+                inset(r, 2 * t)
+            }
+            Bevel::Thin => {
+                edge(hdc, r, p.shadow, p.hilite);
+                inset(r, t)
+            }
+        },
+    }
 }
 
 /// Fill `r` with a two-color gradient, top→bottom if `vertical`, else

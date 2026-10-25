@@ -41,6 +41,52 @@ impl AppMode {
     }
 }
 
+/// The look of the Settings window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Theme {
+    /// Windows 9x: gray bevels and a gradient title bar (the default).
+    Classic,
+    /// Windows 3.1: white dialog, solid navy title bar, black outlines.
+    Win31,
+    /// Windows 10/11: flat, light, Segoe UI, blue accent.
+    Flat,
+    /// Mac OS 9 Platinum: soft gray bevels and a pinstriped title bar.
+    Platinum,
+}
+
+impl Theme {
+    /// Every theme, in the order the picker lists them.
+    pub const ALL: [Theme; 4] = [Theme::Classic, Theme::Win31, Theme::Flat, Theme::Platinum];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Theme::Classic => "Classic (Windows 9x)",
+            Theme::Win31 => "Windows 3.1",
+            Theme::Flat => "Windows 10/11 Flat",
+            Theme::Platinum => "Mac OS 9 Platinum",
+        }
+    }
+
+    fn to_u32(self) -> u32 {
+        match self {
+            Theme::Classic => 0,
+            Theme::Win31 => 1,
+            Theme::Flat => 2,
+            Theme::Platinum => 3,
+        }
+    }
+
+    fn from_u32(v: u32) -> Option<Theme> {
+        match v {
+            0 => Some(Theme::Classic),
+            1 => Some(Theme::Win31),
+            2 => Some(Theme::Flat),
+            3 => Some(Theme::Platinum),
+            _ => None,
+        }
+    }
+}
+
 /// Separator between exe names in the stored app lists. `|` cannot appear in
 /// a Windows file name, so no escaping is needed.
 const APP_SEP: char = '|';
@@ -76,6 +122,8 @@ pub struct Settings {
     /// Kept apart from `apps_only` so switching modes never reinterprets an
     /// allow-list as a block-list or vice versa.
     pub apps_except: Vec<String>,
+    /// The Settings window's look.
+    pub theme: Theme,
 }
 
 impl Default for Settings {
@@ -94,6 +142,7 @@ impl Default for Settings {
             app_mode: AppMode::All,
             apps_only: Vec::new(),
             apps_except: Vec::new(),
+            theme: Theme::Classic,
         }
     }
 }
@@ -136,6 +185,9 @@ impl Settings {
                 s.apps_except = read_str(&text, "appsExcept")
                     .map(|v| parse_app_list(&v))
                     .unwrap_or_default();
+                s.theme = read_u32(&text, "theme")
+                    .and_then(Theme::from_u32)
+                    .unwrap_or(s.theme);
             }
         }
         s.sanitize();
@@ -158,7 +210,7 @@ impl Settings {
                 let _ = fs::create_dir_all(dir);
             }
             let json = format!(
-                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {},\n  \"playSound\": {},\n  \"quickVietnamese\": {},\n  \"deferredDiacritics\": {},\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {},\n  \"lastUpdateCheck\": {},\n  \"appMode\": {},\n  \"appsOnly\": \"{}\",\n  \"appsExcept\": \"{}\"\n}}\n",
+                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {},\n  \"playSound\": {},\n  \"quickVietnamese\": {},\n  \"deferredDiacritics\": {},\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {},\n  \"lastUpdateCheck\": {},\n  \"appMode\": {},\n  \"appsOnly\": \"{}\",\n  \"appsExcept\": \"{}\",\n  \"theme\": {}\n}}\n",
                 self.enabled,
                 self.step_by_step,
                 self.start_with_windows,
@@ -171,7 +223,8 @@ impl Settings {
                 self.last_update_check,
                 self.app_mode.to_u32(),
                 join_app_list(&self.apps_only),
-                join_app_list(&self.apps_except)
+                join_app_list(&self.apps_except),
+                self.theme.to_u32()
             );
             let _ = fs::write(&path, json);
         }
@@ -601,6 +654,16 @@ mod tests {
         // App names never shadow a settings key.
         assert_eq!(read_bool(&json, "enabled"), Some(true));
         assert_eq!(read_str("{ \"appsOnly\": \"\" }", "appsOnly"), Some(String::new()));
+    }
+
+    #[test]
+    fn round_trips_theme() {
+        for theme in Theme::ALL {
+            let json = format!("{{ \"appMode\": 0, \"theme\": {} }}", theme.to_u32());
+            assert_eq!(read_u32(&json, "theme").and_then(Theme::from_u32), Some(theme));
+        }
+        // An unknown value falls back to the default rather than failing.
+        assert_eq!(Theme::from_u32(9), None);
     }
 
     #[test]
