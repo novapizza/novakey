@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- NovaKey app icon (Nova Suite AppIcon, app="novakey"). The 824px tile sits
+       on Apple's 1024 icon grid; crop to viewBox="80 80 864 864" for a tight fit. -->
+  <defs>
+    <linearGradient id="n" gradientUnits="userSpaceOnUse" x1="380" y1="290" x2="650" y2="740">
+      <stop offset="0" stop-color="#FFEDD5"/>
+      <stop offset=".5" stop-color="#FB923C"/>
+      <stop offset="1" stop-color="#EA580C"/>
+    </linearGradient>
+    <clipPath id="c"><rect x="100" y="100" width="824" height="824" rx="190"/></clipPath>
+    <filter id="g" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="70"/></filter>
+    <filter id="b" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="20"/></filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="190" fill="#13111A"/>
+  <g clip-path="url(#c)"><circle cx="330" cy="280" r="300" fill="#F97316" opacity=".45" filter="url(#g)"/></g>
+  <rect x="100" y="100" width="824" height="824" rx="190" fill="none" stroke="#FDBA74" stroke-opacity=".55" stroke-width="10"/>
+  <g opacity=".9">
+    <path d="M362 232 L418 186 L474 232" fill="none" stroke="#FDBA74" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="512" cy="820" r="26" fill="#FDBA74"/>
+  </g>
+  <path d="M418 700L418 330L606 700L606 330" fill="none" stroke="url(#n)" stroke-width="80" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="668" cy="262" r="56" fill="#FDBA74" opacity=".5" filter="url(#b)"/>
+  <path transform="translate(668 262) scale(58)" fill="#FFFFFF" d="M0,-1 C.1,-.29 .29,-.1 1,0 .29,.1 .1,.29 0,1 -.1,.29 -.29,.1 -1,0 -.29,-.1 -.1,-.29 0,-1 Z"/>
+</svg>

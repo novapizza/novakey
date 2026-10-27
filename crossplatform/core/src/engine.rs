@@ -2,6 +2,7 @@
 //! Core Telex input processing engine — port of TelexEngine.swift.
 //! Pure logic, no OS dependencies — fully testable.
 
+use crate::abbrev::Abbreviations;
 use crate::buffer::SyllableBuffer;
 use crate::data::{telex_tone_key, ToneMark, ViChar, VowelModifier, TELEX_VOWEL_MODIFIERS};
 use crate::spelling::is_valid_syllable;
@@ -220,6 +221,31 @@ impl TelexEngine {
                 result
             }
         }
+    }
+
+    /// Expand the word being composed if it is an abbreviation — called by the
+    /// frontend when Tab ends a word, before `process_key`. Matches what is
+    /// on screen first ("đc"), then the raw keys behind it ("omw", which Telex
+    /// shows as "ơm"); the raw keys are skipped after a mid-word backspace,
+    /// when they no longer describe the screen. On a match the word is
+    /// forgotten (Backspace will not step back into it) and the result is a
+    /// `Restore`; the frontend consumes the Tab rather than re-sending it.
+    pub fn expand_abbreviation(&mut self, table: &Abbreviations) -> Option<EngineResult> {
+        if self.buffer.is_empty() {
+            return None;
+        }
+        let screen = self.buffer.text();
+        let text = table.expand(&screen).or_else(|| {
+            if self.inline_guard_disabled {
+                None
+            } else {
+                table.expand(&self.raw_keystrokes)
+            }
+        })?;
+        let backspaces = screen.chars().count();
+        self.saved_buffer = None;
+        self.reset_session();
+        Some(EngineResult::Restore { backspaces, text })
     }
 
     /// Reset the syllable buffer and start fresh.
@@ -690,6 +716,15 @@ impl TelexEngine {
     // MARK: - Backspace Handling
 
     fn handle_backspace(&mut self) -> EngineResult {
+        // While the screen still shows exactly the keys typed, Backspace
+        // deletes the last key, so the raw keystrokes stay exact — and an
+        // abbreviation that Telex will change on screen ("omw" -> "ơm") can
+        // still be matched by its keys after a typo is fixed.
+        if !self.inline_guard_disabled && self.buffer.text() == self.raw_keystrokes {
+            self.buffer.remove_last();
+            self.raw_keystrokes.pop();
+            return EngineResult::PassThrough;
+        }
         self.buffer.remove_last();
         // Once the user corrects mid-word, we can't reconstruct the original
         // raw keystrokes, so disable the restore path for this session — and

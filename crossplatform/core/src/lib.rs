@@ -4,7 +4,8 @@
 //! reimplementation of the NovaKey macOS Swift engine (`Sources/NovaKey/Engine/`).
 //! No OS dependencies, so the full parity suite runs anywhere.
 //!
-//! Public API: [`TelexEngine`], [`EngineResult`], [`KeyClass`].
+//! Public API: [`TelexEngine`], [`EngineResult`], [`KeyClass`], and the
+//! abbreviation table [`Abbreviations`] with its [`WordTracker`].
 //!
 //! # Output invariant
 //! Every character the engine emits is a single precomposed NFC BMP scalar
@@ -12,12 +13,14 @@
 //! sender treat "1 replaced char = 1 UTF-16 unit = 1 backspace". See
 //! [`assert_single_scalar_output`].
 
+pub mod abbrev;
 pub mod buffer;
 pub mod data;
 pub mod engine;
 pub mod spelling;
 pub mod tone;
 
+pub use abbrev::{AbbrevError, Abbreviations, WordTracker};
 pub use buffer::SyllableBuffer;
 pub use data::{ToneMark, ViChar, VowelModifier};
 pub use engine::{EngineResult, KeyClass, TelexEngine};

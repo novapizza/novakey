@@ -1,7 +1,7 @@
 //! Build script: embed the NovaKey application icon into the exe.
 //!
-//! The icon (assets/NovaKey.ico) is generated from Asset/NewLogo.png — the same
-//! branded logo the macOS app uses. It becomes the Explorer file icon and is
+//! The icon (assets/NovaKey.ico) is generated from Asset/NovaKeyLogo.svg — the
+//! same branded logo the macOS app uses. It becomes the Explorer file icon and is
 //! loaded at runtime (resource id 1) for the window and the "Vietnamese OFF"
 //! tray icon. assets/NovaKey_V.ico (resource id 2) is the "Vietnamese ON"
 //! variant, used for the tray icon while Vietnamese input is enabled.
