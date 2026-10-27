@@ -13,21 +13,27 @@ crossplatform/
 │   └── tests/parity.rs   — Rust port of ../Tests/run_tests.swift (the oracle)
 └── windows/   novakey-win — the app: WH_KEYBOARD_LL hook + SendInput
     ├── build.rs             — embeds the app icon into the exe
-    ├── assets/NovaKey.ico   — multi-size icon (16–256 px) from ../../Asset/NewLogo.png
+    ├── assets/NovaKey.ico   — multi-size icon (16–256 px) from ../../Asset/NovaKeyLogo.svg
     └── src/{main,hook,sender,vk,tray,settings}.rs
 ```
 
 ## App icon
 
-`assets/NovaKey.ico` is generated from `../Asset/NewLogo.png` (the branded
-NovaKey logo the macOS app also uses) as a 9-size icon (16/20/24/32/40/48/64/
-128/256 px). `build.rs` embeds it via `winresource` as resource id 1, so it is
-the Explorer file icon; `tray::app_icon()` loads the same resource for the tray
-icon and window class. Regenerate after changing the logo:
+`assets/NovaKey.ico` is generated from `../Asset/NovaKeyLogo.svg` (the Nova
+Suite NovaKey icon, which the macOS app also uses) as a 9-size icon (16/20/24/
+32/40/48/64/128/256 px). `build.rs` embeds it via `winresource` as resource
+id 1, so it is the Explorer file icon; `tray::app_icon()` loads the same
+resource for the tray icon and window class. Regenerate after changing the logo:
+render the SVG with its viewBox cropped to `80 80 864 864` to a 1024 px
+transparent PNG (it uses blur filters, so use a browser, e.g. headless Edge with
+`--default-background-color=00000000`), then:
 
 ```sh
-python -c "from PIL import Image; Image.open(r'../Asset/NewLogo.png').convert('RGBA').save(r'windows/assets/NovaKey.ico', sizes=[(s,s) for s in (16,20,24,32,40,48,64,128,256)])"
+python -c "from PIL import Image; Image.open(r'logo.png').convert('RGBA').save(r'windows/assets/NovaKey.ico', sizes=[(s,s) for s in (16,20,24,32,40,48,64,128,256)])"
 ```
+
+The macOS `Resources/AppLogo.png` is the same cropped render; `Resources/AppIcon.icns`
+is rendered at the SVG's full `0 0 1024 1024` viewBox (Apple's icon grid).
 
 `novakey-core` is a manual, line-for-line reimplementation of the Swift engine
 in `../Sources/NovaKey/Engine/`. Every character it emits is a single
@@ -57,6 +63,22 @@ in any app and toggle **Vietnamese in <app>**. Where NovaKey is paused the tray
 badge shows **E** and the tooltip says so; your V/E choice is kept unchanged
 for the other apps. Every Chrome window and installed web app shares
 `chrome.exe`, so they can't be told apart.
+
+### Abbreviations (gõ tắt)
+
+Settings > **Abbreviations** > **Expand abbreviations** (off by default) turns
+a short form plus **Tab** into its full text: `btw` → `by the way`,
+`nz` → `New Zealand`. It works in both V and E mode, but not in apps paused by
+the per-app rules. **Edit List…** opens the editor; abbreviations are 2–32
+letters, matched in any case, and the expansion follows how you typed it
+(`Btw` → `By the way`, `BTW` → `BY THE WAY`). In V mode an entry matches either
+the keys you pressed (`omw`, even though Telex shows `ơm`) or the composed text
+(`đc`). The Tab that expands is consumed (it does not also move the focus or
+trigger shell completion); a Tab after anything else works as usual. It only
+expands when typed right after a space, Enter, Tab, a click or a shortcut such
+as Ctrl+C, so `x.btw` and `2btw` are left alone. The list is saved to
+`%APPDATA%\NovaKey\abbreviations.txt` (one `abbreviation<TAB>expansion` per
+line), which you can also edit by hand; NovaKey reads it at startup.
 
 ## Typing styles (ươ / uw-first)
 

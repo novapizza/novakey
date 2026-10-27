@@ -61,6 +61,12 @@ unsafe extern "system" fn find_foreign_child(hwnd: HWND, lparam: LPARAM) -> BOOL
     }
 }
 
+/// Whether `hwnd` belongs to NovaKey itself (Settings, the abbreviation
+/// editor, the tray menu owner).
+pub unsafe fn is_own_window(hwnd: HWND) -> bool {
+    !hwnd.is_invalid() && window_pid(hwnd) == Some(GetCurrentProcessId())
+}
+
 /// Whether `hwnd` is a window that should not count as "the app the user is
 /// typing in": NovaKey's own windows (Settings, the tray menu owner) and the
 /// taskbar / notification area the user clicks to reach the tray icon.

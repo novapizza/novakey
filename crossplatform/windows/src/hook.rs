@@ -6,19 +6,20 @@
 //! `RefCell` with no locking. The callback must never block (a >300 ms stall
 //! makes Windows silently drop the hook), so it does no I/O or logging.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VK_CAPITAL, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    GetFocus, GetKeyState, VK_CAPITAL, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_SPACE,
+    VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP,
     WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
-use novakey_core::{EngineResult, TelexEngine};
+use novakey_core::{Abbreviations, EngineResult, KeyClass, TelexEngine, WordTracker};
 
 use crate::hotkey::ComboWatcher;
 use crate::sender::{self, NOVAKEY_MAGIC};
@@ -30,6 +31,18 @@ thread_local! {
     /// Watches for a modifier-only toggle shortcut (e.g. Ctrl+Shift), which
     /// `RegisterHotKey` cannot express. Same thread as the hook callback.
     static COMBO: RefCell<ComboWatcher> = const { RefCell::new(ComboWatcher::new()) };
+
+    /// The user's abbreviation list (Settings > Abbreviations).
+    static ABBREVIATIONS: RefCell<Abbreviations> = RefCell::new(Abbreviations::new());
+
+    /// The word being typed, for abbreviations: whether it started at a clean
+    /// boundary, and its letters while Vietnamese composition is off.
+    static WORD: RefCell<WordTracker> = RefCell::new(WordTracker::new());
+
+    /// A NovaKey text box that takes keys literally — no composition, no
+    /// abbreviations — so the abbreviation editor stores exactly the keys the
+    /// user presses ("omw", not the "ơm" Telex would make of it). 0 if none.
+    static LITERAL_FIELD: Cell<isize> = const { Cell::new(0) };
 }
 
 /// Arm the modifier-only toggle shortcut (0 disables it).
@@ -54,6 +67,11 @@ static IS_BROWSER: AtomicBool = AtomicBool::new(false);
 /// either hook saw. The watchdog in main.rs compares it with the system's last
 /// input time to detect a hook Windows silently removed.
 static LAST_HOOK_TIME: AtomicU32 = AtomicU32::new(0);
+/// Whether abbreviations expand (Settings > Abbreviations).
+static ABBREVIATIONS_ON: AtomicBool = AtomicBool::new(false);
+/// Whether one of NovaKey's own windows has the focus. Abbreviations never
+/// expand there, or typing "btw" into the abbreviation editor would expand it.
+static IN_OWN_WINDOW: AtomicBool = AtomicBool::new(false);
 
 pub fn last_hook_time() -> u32 {
     LAST_HOOK_TIME.load(Ordering::Relaxed)
@@ -111,9 +129,43 @@ fn should_guard_autocomplete() -> bool {
     FIX_AUTOCOMPLETE.load(Ordering::Relaxed) && IS_BROWSER.load(Ordering::Relaxed)
 }
 
+/// Record whether one of NovaKey's own windows is in the foreground.
+pub fn set_in_own_window(on: bool) {
+    IN_OWN_WINDOW.store(on, Ordering::Relaxed);
+}
+
+/// Turn abbreviation expansion on or off.
+pub fn set_abbreviations_enabled(on: bool) {
+    ABBREVIATIONS_ON.store(on, Ordering::Relaxed);
+}
+
+/// Replace the abbreviation list.
+pub fn set_abbreviations(table: Abbreviations) {
+    ABBREVIATIONS.with(|t| *t.borrow_mut() = table);
+}
+
+/// A copy of the abbreviation list, for the editor.
+pub fn abbreviations() -> Abbreviations {
+    ABBREVIATIONS.with(|t| t.borrow().clone())
+}
+
+/// Make `hwnd` (a NovaKey text box) take keys literally while it has the
+/// focus; `None` clears it.
+pub fn set_literal_field(hwnd: Option<isize>) {
+    LITERAL_FIELD.with(|f| f.set(hwnd.unwrap_or(0)));
+}
+
+/// Whether the focused window is the literal text box. `GetFocus` only sees
+/// this thread's windows, which is where the editor lives.
+fn in_literal_field() -> bool {
+    let field = LITERAL_FIELD.with(|f| f.get());
+    field != 0 && unsafe { GetFocus() }.0 as isize == field
+}
+
 /// Reset the composition session — called on mouse click and foreground change.
 pub fn reset_engine() {
     ENGINE.with(|e| e.borrow_mut().reset_session());
+    WORD.with(|w| w.borrow_mut().boundary());
 }
 
 /// Enable/disable "Quick Vietnamese" on the engine (persists across resets).
@@ -160,9 +212,9 @@ pub unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: L
         return CallNextHookEx(None, code, wparam, lparam);
     }
 
-    // Disabled, or paused in this app by the per-app rules -> behave like a
-    // plain keyboard.
-    if !is_enabled() || !is_app_allowed() {
+    // Paused in this app by the per-app rules, or typing into the literal
+    // text box -> behave like a plain keyboard.
+    if !is_app_allowed() || in_literal_field() {
         return CallNextHookEx(None, code, wparam, lparam);
     }
 
@@ -174,6 +226,23 @@ pub unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: L
     let ctrl = key_down(VK_CONTROL.0) || key_down(VK_LWIN.0) || key_down(VK_RWIN.0);
     let alt = key_down(VK_MENU.0);
     let shift = shift_state_for_letter();
+    let vietnamese = is_enabled();
+
+    // Tab after an abbreviation replaces it with its expansion, in either
+    // language. The Tab is consumed, so it does not also move the focus or
+    // trigger a shell's completion; a Tab that expands nothing passes through.
+    if vk_code == VK_TAB.0 as u32 && !ctrl && !alt && !key_down(VK_SHIFT.0) {
+        if let Some(EngineResult::Restore { backspaces, text }) = expand_abbreviation(vietnamese) {
+            send_replace(backspaces, &text);
+            return LRESULT(1);
+        }
+    }
+    track_word(key, shift, ctrl || alt, vk_code);
+
+    // English: nothing to compose.
+    if !vietnamese {
+        return CallNextHookEx(None, code, wparam, lparam);
+    }
 
     let result = ENGINE.with(|e| e.borrow_mut().process_key(key, shift, ctrl, alt));
 
@@ -186,32 +255,86 @@ pub unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: L
             // the batch is inherently "step by step" at the unit level; the flag
             // is retained for parity with macOS and future tuning.
             let _ = STEP_BY_STEP.load(Ordering::Relaxed);
-            let inputs = if backspaces > 0 && should_guard_autocomplete() {
-                // U+202F collapses the URL-bar autocomplete selection; +1 BS
-                // deletes it back out.
-                let mut v = sender::build_autocomplete_prefix();
-                v.extend(sender::build_replace(backspaces + 1, &text));
-                v
-            } else {
-                sender::build_replace(backspaces, &text)
-            };
-            sender::send(&inputs);
+            send_replace(backspaces, &text);
             LRESULT(1) // suppress the original key
         }
         EngineResult::Restore { backspaces, text } => {
-            // Suppress the original word-break key and re-inject it after the
-            // restore text so ordering is preserved.
-            let inputs = if backspaces > 0 && should_guard_autocomplete() {
-                let mut v = sender::build_autocomplete_prefix();
-                v.extend(sender::build_restore(backspaces + 1, &text, vk_code as u16));
-                v
-            } else {
-                sender::build_restore(backspaces, &text, vk_code as u16)
-            };
-            sender::send(&inputs);
+            send_restore(backspaces, &text, vk_code);
             LRESULT(1)
         }
     }
+}
+
+/// Send a `Replace`: delete `backspaces` characters and type `text`.
+fn send_replace(backspaces: usize, text: &str) {
+    let inputs = if backspaces > 0 && should_guard_autocomplete() {
+        // U+202F collapses the URL-bar autocomplete selection; +1 BS
+        // deletes it back out.
+        let mut v = sender::build_autocomplete_prefix();
+        v.extend(sender::build_replace(backspaces + 1, text));
+        v
+    } else {
+        sender::build_replace(backspaces, text)
+    };
+    sender::send(&inputs);
+}
+
+/// Send a `Restore`: suppress the original word-break key and re-inject it
+/// after the replacement text so ordering is preserved.
+fn send_restore(backspaces: usize, text: &str, vk_code: u32) {
+    let inputs = if backspaces > 0 && should_guard_autocomplete() {
+        let mut v = sender::build_autocomplete_prefix();
+        v.extend(sender::build_restore(backspaces + 1, text, vk_code as u16));
+        v
+    } else {
+        sender::build_restore(backspaces, text, vk_code as u16)
+    };
+    sender::send(&inputs);
+}
+
+/// The replacement for the word Tab is ending, if it is an abbreviation
+/// that started at a clean boundary. In Vietnamese the engine knows both what
+/// is on screen and the keys behind it; in English the tracker's letters are
+/// what is on screen.
+fn expand_abbreviation(vietnamese: bool) -> Option<EngineResult> {
+    if !ABBREVIATIONS_ON.load(Ordering::Relaxed) || IN_OWN_WINDOW.load(Ordering::Relaxed) {
+        return None;
+    }
+    if !WORD.with(|w| w.borrow().is_clean()) {
+        return None;
+    }
+    let result = ABBREVIATIONS.with(|t| {
+        let t = t.borrow();
+        if vietnamese {
+            ENGINE.with(|e| e.borrow_mut().expand_abbreviation(&t))
+        } else {
+            WORD.with(|w| w.borrow().word().and_then(|word| t.expand_word(word)))
+        }
+    })?;
+    if let EngineResult::Restore { text, .. } = &result {
+        WORD.with(|w| w.borrow_mut().expanded(text));
+    }
+    Some(result)
+}
+
+/// Feed a keydown to the abbreviation word tracker. `modified`: Ctrl, Alt or
+/// Win is held, so the key is a shortcut rather than typing. A shortcut starts
+/// a fresh word — Ctrl+C, Ctrl+U or Ctrl+L leave a terminal on a clean prompt,
+/// Ctrl+Backspace and Ctrl+arrows land on a word edge — except paste, which
+/// leaves unseen text glued before the caret.
+fn track_word(key: KeyClass, shift: bool, modified: bool, vk_code: u32) {
+    WORD.with(|w| {
+        let mut w = w.borrow_mut();
+        match key {
+            _ if modified && vk_code == u32::from(b'V') => w.interrupt(),
+            _ if modified => w.boundary(),
+            KeyClass::Letter(c) => w.letter(if shift { c.to_ascii_uppercase() } else { c }),
+            KeyClass::Backspace => w.backspace(),
+            KeyClass::WordBreak if vk_code == VK_SPACE.0 as u32 => w.space(),
+            KeyClass::WordBreak if vk::starts_word(vk_code) => w.boundary(),
+            _ => w.interrupt(),
+        }
+    });
 }
 
 /// Low-level mouse hook callback — any button/press resets the session so we

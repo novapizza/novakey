@@ -57,6 +57,21 @@ fn is_word_break(vk: u32) -> bool {
     )
 }
 
+/// Word breaks after which a new word starts on a clean slate (whitespace,
+/// Escape, caret moves), as opposed to punctuation and forward delete, which
+/// leave the caret glued to the text before it. An abbreviation only expands
+/// when it was typed right after one of these.
+pub fn starts_word(vk: u32) -> bool {
+    matches!(
+        vk,
+        0x20 |          // VK_SPACE
+        0x0D |          // VK_RETURN
+        0x09 |          // VK_TAB
+        0x1B |          // VK_ESCAPE
+        0x21..=0x28     // Page Up/Down, End, Home, arrows
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +102,18 @@ mod tests {
         assert_eq!(classify(0x11), None); // control
         assert_eq!(classify(0x14), None); // capslock
         assert_eq!(classify(0xA0), None); // lshift
+    }
+
+    #[test]
+    fn clean_word_starts() {
+        assert!(starts_word(0x20)); // space
+        assert!(starts_word(0x0D)); // enter
+        assert!(starts_word(0x09)); // tab
+        assert!(starts_word(0x25)); // left arrow
+        assert!(!starts_word(0xBE)); // period
+        assert!(!starts_word(0xDE)); // apostrophe
+        assert!(!starts_word(0x2E)); // forward delete
+        assert!(!starts_word(0x30)); // '0'
     }
 
     #[test]

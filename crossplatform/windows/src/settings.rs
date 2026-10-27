@@ -6,6 +6,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use novakey_core::Abbreviations;
+
 use crate::hotkey;
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -124,6 +126,9 @@ pub struct Settings {
     pub apps_except: Vec<String>,
     /// The Settings window's look.
     pub theme: Theme,
+    /// Expand abbreviations ("btw" + Tab -> "by the way"). The list itself
+    /// lives in its own file, see `load_abbreviations`.
+    pub abbreviations: bool,
 }
 
 impl Default for Settings {
@@ -143,6 +148,7 @@ impl Default for Settings {
             apps_only: Vec::new(),
             apps_except: Vec::new(),
             theme: Theme::Classic,
+            abbreviations: false,
         }
     }
 }
@@ -188,6 +194,7 @@ impl Settings {
                 s.theme = read_u32(&text, "theme")
                     .and_then(Theme::from_u32)
                     .unwrap_or(s.theme);
+                s.abbreviations = read_bool(&text, "abbreviations").unwrap_or(s.abbreviations);
             }
         }
         s.sanitize();
@@ -210,7 +217,7 @@ impl Settings {
                 let _ = fs::create_dir_all(dir);
             }
             let json = format!(
-                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {},\n  \"playSound\": {},\n  \"quickVietnamese\": {},\n  \"deferredDiacritics\": {},\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {},\n  \"lastUpdateCheck\": {},\n  \"appMode\": {},\n  \"appsOnly\": \"{}\",\n  \"appsExcept\": \"{}\",\n  \"theme\": {}\n}}\n",
+                "{{\n  \"enabled\": {},\n  \"stepByStep\": {},\n  \"startWithWindows\": {},\n  \"fixBrowserAutocomplete\": {},\n  \"playSound\": {},\n  \"quickVietnamese\": {},\n  \"deferredDiacritics\": {},\n  \"hotkeyMods\": {},\n  \"hotkeyVk\": {},\n  \"lastUpdateCheck\": {},\n  \"appMode\": {},\n  \"appsOnly\": \"{}\",\n  \"appsExcept\": \"{}\",\n  \"theme\": {},\n  \"abbreviations\": {}\n}}\n",
                 self.enabled,
                 self.step_by_step,
                 self.start_with_windows,
@@ -224,11 +231,55 @@ impl Settings {
                 self.app_mode.to_u32(),
                 join_app_list(&self.apps_only),
                 join_app_list(&self.apps_except),
-                self.theme.to_u32()
+                self.theme.to_u32(),
+                self.abbreviations
             );
             let _ = fs::write(&path, json);
         }
     }
+}
+
+// MARK: - Abbreviations
+
+/// `%APPDATA%\NovaKey\abbreviations.txt` — a plain text file rather than a
+/// field of settings.json: expansions are free text (quotes, Unicode) that
+/// the flat JSON reader cannot hold, and the user can edit it in Notepad.
+fn abbreviations_path() -> Option<PathBuf> {
+    Some(settings_path()?.with_file_name("abbreviations.txt"))
+}
+
+/// Largest abbreviations file read, so a stray huge file cannot stall startup.
+const MAX_ABBREVIATIONS_FILE: u64 = 4 * 1024 * 1024;
+
+/// Load the abbreviation list (empty if missing, unreadable or too large).
+pub fn load_abbreviations() -> Abbreviations {
+    let Some(path) = abbreviations_path() else { return Abbreviations::new() };
+    match fs::metadata(&path) {
+        Ok(m) if m.len() <= MAX_ABBREVIATIONS_FILE => {}
+        _ => return Abbreviations::new(),
+    }
+    fs::read_to_string(&path)
+        .map(|text| Abbreviations::parse(&text))
+        .unwrap_or_default()
+}
+
+/// Save the abbreviation list. Written to a temporary file and renamed over
+/// the old one, so a failed write never leaves a truncated list behind.
+/// Returns whether it was saved.
+pub fn save_abbreviations(table: &Abbreviations) -> bool {
+    let Some(path) = abbreviations_path() else { return false };
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("txt.tmp");
+    if fs::write(&tmp, table.serialize()).is_err() {
+        return false;
+    }
+    if fs::rename(&tmp, &path).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return false;
+    }
+    true
 }
 
 // MARK: - Per-app rules
@@ -654,6 +705,13 @@ mod tests {
         // App names never shadow a settings key.
         assert_eq!(read_bool(&json, "enabled"), Some(true));
         assert_eq!(read_str("{ \"appsOnly\": \"\" }", "appsOnly"), Some(String::new()));
+    }
+
+    #[test]
+    fn round_trips_abbreviations_flag() {
+        let json = "{ \"theme\": 0, \"abbreviations\": true }";
+        assert_eq!(read_bool(json, "abbreviations"), Some(true));
+        assert!(!Settings::default().abbreviations);
     }
 
     #[test]

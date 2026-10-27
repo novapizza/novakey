@@ -42,6 +42,8 @@ pub const CMD_UPDATE: usize = 10;
 pub const CMD_APP_TOGGLE: usize = 11;
 /// The Settings window edited the per-app rules; re-evaluate the current app.
 pub const CMD_APPS_CHANGED: usize = 12;
+/// Turn abbreviation expansion on/off (from the Settings window).
+pub const CMD_ABBREVIATIONS: usize = 13;
 
 const TRAY_UID: u32 = 1;
 

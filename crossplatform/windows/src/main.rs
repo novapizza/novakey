@@ -8,6 +8,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod abbrev_dialog;
 mod apps;
 mod badge;
 mod hook;
@@ -186,6 +187,8 @@ unsafe fn run() {
     hook::set_fix_autocomplete(loaded.fix_browser_autocomplete);
     hook::set_quick_vietnamese(loaded.quick_vietnamese);
     hook::set_deferred_diacritics(loaded.deferred_diacritics);
+    hook::set_abbreviations_enabled(loaded.abbreviations);
+    hook::set_abbreviations(settings::load_abbreviations());
     SETTINGS.with(|s| *s.borrow_mut() = loaded);
     sync_autostart();
 
@@ -400,6 +403,7 @@ unsafe extern "system" fn winevent_proc(
 unsafe fn on_foreground(hwnd: HWND) {
     let app = apps::window_app(hwnd);
     hook::set_is_browser(app.as_deref().is_some_and(apps::is_browser));
+    hook::set_in_own_window(apps::is_own_window(hwnd));
     // NovaKey's own windows and the taskbar (clicked on the way to the tray
     // menu) keep the previous app's rules in force.
     if apps::is_transient_window(hwnd) {
@@ -756,6 +760,15 @@ unsafe fn handle_command(hwnd: HWND, cmd: usize) {
             }
         }
         tray::CMD_APPS_CHANGED => apply_app_rules(),
+        tray::CMD_ABBREVIATIONS => {
+            let new = SETTINGS.with(|s| {
+                let mut s = s.borrow_mut();
+                s.abbreviations = !s.abbreviations;
+                s.save();
+                s.abbreviations
+            });
+            hook::set_abbreviations_enabled(new);
+        }
         tray::CMD_UPDATE => spawn_update_check(hwnd, /*background=*/ false),
         tray::CMD_QUIT => {
             let _ = DestroyWindow(hwnd);

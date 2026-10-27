@@ -1,6 +1,6 @@
 //! ui.rs
-//! An owner-drawn Settings window (INPUT METHOD / APP SCOPE / GENERAL /
-//! APPEARANCE / COMPATIBILITY, mirroring the macOS preferences pane) in one of
+//! An owner-drawn Settings window (INPUT METHOD / ABBREVIATIONS / APP SCOPE /
+//! GENERAL / APPEARANCE / COMPATIBILITY, mirroring the macOS preferences pane) in one of
 //! four themes, chosen under Appearance: classic Windows 9x (the default — a
 //! beveled gray frame with a gradient title bar, etched group boxes, 3D push
 //! buttons and a sunken status bar), Windows 3.1, Windows 10/11 flat, and
@@ -67,8 +67,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::hotkey;
 use crate::settings::{AppMode, Settings, Theme};
 use crate::tray::{
-    CMD_APPS_CHANGED, CMD_AUTOCOMPLETE, CMD_AUTOSTART, CMD_DEFERRED, CMD_PLAYSOUND, CMD_QUICKVN,
-    CMD_STEP, CMD_TOGGLE,
+    CMD_ABBREVIATIONS, CMD_APPS_CHANGED, CMD_AUTOCOMPLETE, CMD_AUTOSTART, CMD_DEFERRED,
+    CMD_PLAYSOUND, CMD_QUICKVN, CMD_STEP, CMD_TOGGLE,
 };
 
 // MARK: - Layout constants (96-DPI layout units)
@@ -108,6 +108,8 @@ const CAPTIONED_ROW_H: i32 = 38;
 /// The INPUT METHOD group: language buttons (52), shortcut panel (48), status
 /// line (24), input mode (36), separator (12), two captioned options (46 + 38).
 const INPUT_GROUP_H: i32 = GROUP_HEAD + 52 + 48 + 24 + 36 + 12 + 46 + CAPTIONED_ROW_H + GROUP_PAD;
+/// ABBREVIATIONS: a captioned checkbox, then the "Edit List…" button row.
+const ABBREV_GROUP_H: i32 = GROUP_HEAD + CAPTIONED_ROW_H + 8 + 28 + GROUP_PAD;
 /// GENERAL and COMPATIBILITY: two plain checkbox rows each.
 const TWO_ROW_GROUP_H: i32 = GROUP_HEAD + CHECK_ROW_H + 8 + CHECK_ROW_H + GROUP_PAD;
 /// APPEARANCE: the theme picker row.
@@ -125,6 +127,8 @@ enum Region {
     HotkeyReset,
     ToggleQuickVn,
     ToggleDeferred,
+    ToggleAbbrev,
+    AbbrevEdit,
     ToggleAutostart,
     ToggleSound,
     ToggleFix,
@@ -354,6 +358,8 @@ fn content_height() -> i32 {
     });
     MARGIN
         + INPUT_GROUP_H
+        + GROUP_GAP
+        + ABBREV_GROUP_H
         + GROUP_GAP
         + scope_group_height(mode, n)
         + GROUP_GAP
@@ -737,6 +743,8 @@ unsafe fn activate(hwnd: HWND, region: Region, hit_rect: RECT) {
                 send_cmd(main_hwnd, CMD_DEFERRED);
             }
         }
+        Region::ToggleAbbrev => send_cmd(main_hwnd, CMD_ABBREVIATIONS),
+        Region::AbbrevEdit => crate::abbrev_dialog::open(hwnd),
         Region::ToggleAutostart => send_cmd(main_hwnd, CMD_AUTOSTART),
         Region::ToggleSound => send_cmd(main_hwnd, CMD_PLAYSOUND),
         Region::ToggleFix => send_cmd(main_hwnd, CMD_AUTOCOMPLETE),
@@ -1000,6 +1008,8 @@ struct View {
     sound: bool,
     quick_vn: bool,
     deferred: bool,
+    abbrev: bool,
+    abbrev_count: usize,
     hotkey_text: String,
     hotkey_bound: bool,
     app_mode: AppMode,
@@ -1160,7 +1170,7 @@ fn glyph(g: Glyph) -> &'static str {
 unsafe fn paint(hwnd: HWND) {
     // Snapshot the state we render.
     sync_theme();
-    let (autostart, step, sound, quick_vn, deferred, mods, vk, app_mode, app_list) =
+    let (autostart, step, sound, quick_vn, deferred, abbrev, mods, vk, app_mode, app_list) =
         crate::SETTINGS.with(|s| {
             let s = s.borrow();
             (
@@ -1169,6 +1179,7 @@ unsafe fn paint(hwnd: HWND) {
                 s.play_sound,
                 s.quick_vietnamese,
                 s.deferred_diacritics,
+                s.abbreviations,
                 s.hotkey_mods,
                 s.hotkey_vk,
                 s.app_mode,
@@ -1196,6 +1207,8 @@ unsafe fn paint(hwnd: HWND) {
         sound,
         quick_vn,
         deferred,
+        abbrev,
+        abbrev_count: crate::hook::abbreviations().len(),
         // No key name contains '+', so this only spaces out the separators.
         hotkey_text: hotkey::describe(mods, vk).replace('+', " + "),
         hotkey_bound: crate::hotkey_bound(),
@@ -1400,6 +1413,35 @@ unsafe fn paint_content(hdc: HDC, cw: i32, v: &View, f: &Fonts, hits: &mut Vec<(
         y += INPUT_GROUP_H + GROUP_GAP;
     }
 
+    // ----- Group: Abbreviations (gõ tắt) -----
+    {
+        group_box(hdc, lrect(gl, y, gr, y + ABBREV_GROUP_H), "Abbreviations", f.group);
+        let mut cy = y + GROUP_HEAD;
+        let r = checkbox_row(
+            hdc,
+            (ix, ir, cy),
+            "Expand abbreviations",
+            Some("Type a short form, then Tab (btw → by the way)"),
+            (v.abbrev, true, v.is_down(Region::ToggleAbbrev)),
+            f,
+        );
+        hits.push((Region::ToggleAbbrev, r));
+        cy += CAPTIONED_ROW_H + 8;
+
+        let edit = rect(ix, cy, ix + 110, cy + 28);
+        push_button(hdc, edit, "Edit List…", f.body, v.is_down(Region::AbbrevEdit), false);
+        hits.push((Region::AbbrevEdit, edit));
+        let count = match v.abbrev_count {
+            0 => "No abbreviations yet".to_string(),
+            1 => "1 abbreviation".to_string(),
+            n => format!("{n} abbreviations"),
+        };
+        SelectObject(hdc, f.italic);
+        draw_text(hdc, &count, rect(ix + 122, cy, ir, cy + 28), p.text2, LEFT | DT_END_ELLIPSIS);
+
+        y += ABBREV_GROUP_H + GROUP_GAP;
+    }
+
     // ----- Group: Target Application Scope (per-app rules) -----
     {
         let h = scope_group_height(v.app_mode, v.app_list.len());
@@ -1556,7 +1598,13 @@ unsafe fn paint_chrome(
     scroll_view: (RECT, i32, i32),
 ) -> ScrollGeom {
     let p = pal();
+    let t = line();
     bevel(hdc, rect_px(0, 0, cw, ch), Bevel::Window);
+    if theme() == Theme::Win31 {
+        // A dialog frame takes the caption color: navy while active.
+        let band = if v.active { p.title_active.0 } else { p.title_inactive.0 };
+        ring(hdc, inset(rect_px(0, 0, cw, ch), t), px(FRAME) - 2 * t, band);
+    }
     paint_title_bar(hdc, cw, v, f, hits);
 
     // Scroll bar, when the content is taller than the viewport.
@@ -1581,7 +1629,12 @@ unsafe fn paint_chrome(
         let track = rect_px(l, up.bottom, r, dn.top);
         fill_solid(hdc, track, p.track);
         let track_len = track.bottom - track.top;
-        let thumb_len = (track_len * view_h / content_px.max(1)).clamp(px(12).min(track_len), track_len);
+        let thumb_len = if theme() == Theme::Win31 {
+            // A square box, whatever the content length.
+            arrow.min(track_len)
+        } else {
+            (track_len * view_h / content_px.max(1)).clamp(px(12).min(track_len), track_len)
+        };
         geom.travel = track_len - thumb_len;
         let thumb_top = track.top + geom.travel * scroll / max_scroll;
         let thumb = rect_px(l, thumb_top, r, thumb_top + thumb_len);
@@ -1611,6 +1664,19 @@ unsafe fn paint_chrome(
         draw_text(hdc, &message, pad_x(msg, px(6)), p.text2, LEFT | DT_END_ELLIPSIS);
         SelectObject(hdc, f.status_bold);
         draw_text(hdc, lang_text, lang, p.accent_text, CENTER);
+    } else if theme() == Theme::Win31 {
+        // A gray strip under a black rule, holding recessed panes.
+        let strip = rect_px(st.left, st.top - px(4), st.right, st.bottom);
+        fill_solid(hdc, strip, p.face);
+        fill_solid(hdc, rect_px(strip.left, strip.top, strip.right, strip.top + t), p.dark);
+        let msg = rect_px(msg.left + px(4), st.top, msg.right, st.bottom - px(4));
+        let lang = rect_px(lang.left, st.top, lang.right - px(4), st.bottom - px(4));
+        edge(hdc, msg, p.shadow, p.hilite);
+        edge(hdc, lang, p.shadow, p.hilite);
+        SelectObject(hdc, f.status);
+        draw_text(hdc, &message, pad_x(inset(msg, t), px(5)), p.text, LEFT | DT_END_ELLIPSIS);
+        SelectObject(hdc, f.status_bold);
+        draw_text(hdc, lang_text, inset(lang, t), p.accent_text, CENTER);
     } else {
         let inner = bevel(hdc, msg, Bevel::Thin);
         SelectObject(hdc, f.status);
@@ -1678,12 +1744,12 @@ fn title_buttons(cw: i32) -> Vec<(Caption, RECT)> {
             vec![(Caption::Minimize, min), (Caption::Maximize, max), (Caption::Close, close)]
         }
         // Square buttons the height of the bar: the system-menu box on the
-        // left, minimize and maximize on the right.
+        // left, minimize on the right. A window that cannot be resized shows
+        // no maximize, as with Control Panel.
         Theme::Win31 => {
             let sys = rect_px(tb.left, tb.top, tb.left + bar_h, tb.bottom);
-            let max = rect_px(tb.right - bar_h, tb.top, tb.right, tb.bottom);
-            let min = rect_px(max.left - bar_h, tb.top, max.left, tb.bottom);
-            vec![(Caption::SysMenu, sys), (Caption::Minimize, min), (Caption::Maximize, max)]
+            let min = rect_px(tb.right - bar_h, tb.top, tb.right, tb.bottom);
+            vec![(Caption::SysMenu, sys), (Caption::Minimize, min)]
         }
         // Wide, full-height buttons; a fixed-size window shows no maximize.
         Theme::Flat => {
@@ -1882,7 +1948,35 @@ unsafe fn scroll_arrow(hdc: HDC, r: RECT, g: Glyph, f: &Fonts) {
     }
     let inner = bevel(hdc, r, Bevel::Raised);
     fill_solid(hdc, inner, p.face);
+    if theme() == Theme::Win31 {
+        win31_arrow(hdc, inner, matches!(g, Glyph::Up), false, p.text);
+        return;
+    }
     draw_text(hdc, glyph(g), inner, p.text, CENTER);
+}
+
+/// The Windows 3.1 arrow: an arrowhead on a short stem, pointing up or down,
+/// with a bar under it when `bar` (the drop-down button). Pixel art scaled by
+/// the line width and centered in `r`.
+unsafe fn win31_arrow(hdc: HDC, r: RECT, up: bool, bar: bool, color: COLORREF) {
+    let t = line();
+    // Row widths, top to bottom, of a down arrow.
+    let mut rows = [3, 3, 3, 9, 7, 5, 3, 1];
+    if up {
+        rows.reverse();
+    }
+    let height = (rows.len() as i32 + if bar { 3 } else { 0 }) * t;
+    let cx = (r.left + r.right - t) / 2;
+    let mut y = r.top + (r.bottom - r.top - height) / 2;
+    let row = |y: i32, w: i32| rect_px(cx - w / 2 * t, y, cx + (w / 2 + 1) * t, y + t);
+    for w in rows {
+        fill_solid(hdc, row(y, w), color);
+        y += t;
+    }
+    if bar {
+        fill_solid(hdc, row(y + t, 9), color);
+        fill_solid(hdc, row(y + 2 * t, 9), color);
+    }
 }
 
 /// The scroll-bar thumb.
@@ -1923,7 +2017,7 @@ unsafe fn combo(hdc: HDC, r: RECT, text: &str, down: bool, f: &Fonts) {
     let arrow_w = px(18);
     let (text_r, arrow_r) = match theme() {
         // A sunken field with a push button holding the arrow.
-        Theme::Classic | Theme::Win31 => {
+        Theme::Classic => {
             let inner = bevel(hdc, r, Bevel::Sunken);
             fill_solid(hdc, inner, p.field);
             let btn = rect_px(inner.right - arrow_w, inner.top, inner.right, inner.bottom);
@@ -1931,6 +2025,23 @@ unsafe fn combo(hdc: HDC, r: RECT, text: &str, down: bool, f: &Fonts) {
             fill_solid(hdc, face, p.face);
             let shift = if down { t } else { 0 };
             (rect_px(inner.left, inner.top, btn.left, inner.bottom), offset(face, shift, shift))
+        }
+        // An outlined field and, set apart from it, a square push button
+        // holding an arrow over a bar.
+        Theme::Win31 => {
+            let btn = rect_px(r.right - (r.bottom - r.top), r.top, r.right, r.bottom);
+            let inner = bevel(hdc, rect_px(r.left, r.top, btn.left - px(2), r.bottom), Bevel::Sunken);
+            fill_solid(hdc, inner, p.field);
+            let face = bevel(hdc, btn, if down { Bevel::Pressed } else { Bevel::Raised });
+            if !down {
+                fill_solid(hdc, face, p.face);
+            }
+            round_corners(hdc, btn, p.bg);
+            let shift = if down { t } else { 0 };
+            SelectObject(hdc, f.body);
+            draw_text(hdc, text, pad_x(inner, px(6)), p.text, LEFT | DT_END_ELLIPSIS);
+            win31_arrow(hdc, offset(face, shift, shift), false, true, p.text);
+            return;
         }
         Theme::Flat => {
             fill_solid(hdc, r, if down { p.bg } else { p.field });
