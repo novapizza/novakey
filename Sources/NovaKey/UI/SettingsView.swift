@@ -47,6 +47,7 @@ struct SettingsView: View {
         ZStack {
             NovaTheme.windowBG.ignoresSafeArea()
 
+            ScrollView(.vertical) {
             VStack(spacing: 14) {
                 Text("NovaKey Settings")
                     .font(.system(size: 13, weight: .semibold))
@@ -63,6 +64,7 @@ struct SettingsView: View {
             .padding(.horizontal, 18)
             .padding(.bottom, 18)
             .padding(.top, 8)
+            }
         }
         .frame(width: 480)
         .onReceive(NotificationCenter.default.publisher(for: .novaKeyModeChanged)) { note in

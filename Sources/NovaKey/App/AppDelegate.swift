@@ -309,8 +309,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let hosting = NSHostingView(rootView: settingsView)
         window.contentView = hosting
         // Size to the cards rather than a fixed height, so adding a section
-        // never clips the bottom of the pane.
-        window.setContentSize(hosting.fittingSize)
+        // never clips the bottom of the pane -- capped to the screen, where
+        // the pane scrolls instead.
+        var size = hosting.fittingSize
+        if let screen = NSScreen.main {
+            size.height = min(size.height, screen.visibleFrame.height - 40)
+        }
+        window.setContentSize(size)
         window.center()
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
