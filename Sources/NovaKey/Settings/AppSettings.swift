@@ -68,6 +68,13 @@ final class AppSettings {
         set { defaults.set(newValue, forKey: AppConstants.Defaults.abbreviationsEnabled) }
     }
 
+    /// Per-app rules: where Vietnamese composition runs (Settings > Apps).
+    /// Defaults to every app.
+    var appRules: AppRules {
+        get { AppRules(dictionary: defaults.dictionary(forKey: AppConstants.Defaults.appRules)) }
+        set { defaults.set(newValue.dictionary, forKey: AppConstants.Defaults.appRules) }
+    }
+
     /// Hotkey keycode for toggling Vietnamese/English.
     ///
     /// Presence, not value, decides whether a keycode was ever recorded: the

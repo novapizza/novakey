@@ -1625,6 +1625,121 @@ test("Coordinator: Vietnamese mode composes normally when no abbreviation") {
 
 
 // ============================================================
+// Per-app rules (Settings > Apps)
+// ============================================================
+print("\n--- Per-app rules ---")
+
+test("AppRules: default allows everything, even unknown apps") {
+    let r = AppRules()
+    try expect(r.mode, .all)
+    try expectTrue(r.allows("com.apple.Safari"))
+    try expectTrue(r.allows(nil))
+    try expect(r.activeList, [])
+}
+
+test("AppRules: only-mode allows just the listed apps") {
+    var r = AppRules(mode: .only)
+    try expectTrue(r.add("com.tinyspeck.slackmacgap"))
+    try expectTrue(r.allows("com.tinyspeck.slackmacgap"))
+    try expectTrue(r.allows("COM.TinySpeck.SlackMacGap")) // case-insensitive
+    try expectFalse(r.allows("com.apple.Safari"))
+    try expectFalse(r.allows(nil)) // unknown app: not listed
+}
+
+test("AppRules: except-mode pauses just the listed apps") {
+    var r = AppRules(mode: .except)
+    try expectTrue(r.add("com.apple.Terminal"))
+    try expectFalse(r.allows("com.apple.terminal"))
+    try expectTrue(r.allows("com.apple.Safari"))
+    try expectTrue(r.allows(nil))
+}
+
+test("AppRules: add rejects invalid, duplicate, full, and all-mode") {
+    var r = AppRules(mode: .only)
+    try expectFalse(r.add(""))
+    try expectFalse(r.add("  "))
+    try expectFalse(r.add("com.example.a b"))
+    try expectFalse(r.add("com.example.a\tb"))
+    try expectFalse(r.add(String(repeating: "x", count: 256)))
+    try expectTrue(r.add(" com.example.App "))
+    try expectFalse(r.add("com.example.app")) // duplicate (normalized)
+    try expect(r.only, ["com.example.app"])
+    var all = AppRules()
+    try expectFalse(all.add("com.example.app"))
+    try expect(all, AppRules())
+
+    var full = AppRules(mode: .except)
+    for i in 0..<AppRules.maxApps { try expectTrue(full.add("com.example.app\(i)")) }
+    try expectFalse(full.add("com.example.onemore"))
+    try expect(full.except.count, AppRules.maxApps)
+}
+
+test("AppRules: lists stay sorted and remove works") {
+    var r = AppRules(mode: .only)
+    r.add("com.b"); r.add("com.a"); r.add("com.c")
+    try expect(r.only, ["com.a", "com.b", "com.c"])
+    r.remove("COM.B")
+    try expect(r.only, ["com.a", "com.c"])
+    r.remove("com.nope")
+    try expect(r.only, ["com.a", "com.c"])
+}
+
+test("AppRules: setEnabled edits the right list per mode") {
+    // From All, turning an app off switches to Except with it listed.
+    var r = AppRules()
+    r.setEnabled("com.apple.Terminal", false)
+    try expect(r.mode, .except)
+    try expect(r.except, ["com.apple.terminal"])
+    try expectFalse(r.allows("com.apple.terminal"))
+    // Turning it back on removes it from the Except list (mode stays).
+    r.setEnabled("com.apple.Terminal", true)
+    try expect(r.mode, .except)
+    try expect(r.except, [])
+    try expectTrue(r.allows("com.apple.terminal"))
+    // Already in the requested state: no change.
+    let before = r
+    r.setEnabled("com.apple.Safari", true)
+    try expect(r, before)
+
+    // Only-mode: on adds, off removes.
+    var o = AppRules(mode: .only, only: ["com.a"])
+    o.setEnabled("com.b", true)
+    try expect(o.only, ["com.a", "com.b"])
+    o.setEnabled("com.a", false)
+    try expect(o.only, ["com.b"])
+    try expect(o.mode, .only)
+}
+
+test("AppRules: stored lists are cleaned on load") {
+    let r = AppRules(mode: .except, except: ["com.B", "com.a", "com.b", "", "bad id", "com.c"])
+    try expect(r.except, ["com.a", "com.b", "com.c"])
+    let capped = AppRules(mode: .only, only: (0..<100).map { "com.app\($0)" })
+    try expect(capped.only.count, AppRules.maxApps)
+}
+
+test("AppRules: dictionary round-trips and tolerates garbage") {
+    let r = AppRules(mode: .only, only: ["com.a", "com.b"], except: ["com.z"])
+    try expect(AppRules(dictionary: r.dictionary), r)
+    try expect(AppRules(dictionary: nil), AppRules())
+    try expect(AppRules(dictionary: ["mode": 99]), AppRules())
+    try expect(AppRules(dictionary: ["mode": "only", "only": 5]), AppRules())
+    let partial = AppRules(dictionary: ["mode": 2, "except": ["com.x"]])
+    try expect(partial, AppRules(mode: .except, except: ["com.x"]))
+}
+
+test("AppRules: AppSettings persists the rules") {
+    let settings = AppSettings.shared
+    let old = settings.appRules
+    defer { settings.appRules = old }
+    let r = AppRules(mode: .except, except: ["com.apple.terminal"])
+    settings.appRules = r
+    try expect(settings.appRules, r)
+    settings.appRules = AppRules()
+    try expect(settings.appRules, AppRules())
+}
+
+
+// ============================================================
 // Toggle-shortcut Tests
 // ============================================================
 print("\n--- Toggle shortcut Tests ---")

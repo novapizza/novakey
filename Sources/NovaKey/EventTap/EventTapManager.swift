@@ -87,6 +87,14 @@ final class EventTapManager {
     /// user presses ("omw", not the "ơm" Telex would make of it).
     var literalInput: Bool = false
 
+    /// Whether the per-app rules (Settings > Apps) allow composition in the
+    /// frontmost app. Separate from `engine.isVietnameseMode` -- the user's
+    /// V/E choice -- so switching apps never changes or persists the language
+    /// setting. Updated on every app activation; the hotkeys still work.
+    var appAllowed: Bool = true {
+        didSet { if appAllowed != oldValue { resetSession() } }
+    }
+
     /// Forget the composition in progress: the syllable buffer and the word
     /// tracker. Called whenever the caret may have moved without us seeing
     /// it (click, app switch, tap revival, mode toggle).
@@ -461,9 +469,10 @@ final class EventTapManager {
         let hasCtrl = flags.contains(.maskControl)
         let hasOption = flags.contains(.maskAlternate)
 
-        // Typing into the literal text box (the abbreviation editor's key
-        // field): behave like a plain keyboard.
-        if literalInput {
+        // Paused in this app by the per-app rules, or typing into the literal
+        // text box (the abbreviation editor's key field): behave like a plain
+        // keyboard. Abbreviations are paused along with composition.
+        if !appAllowed || literalInput {
             return passThrough
         }
 

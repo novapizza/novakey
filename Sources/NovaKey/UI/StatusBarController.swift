@@ -14,6 +14,14 @@ final class StatusBarController {
     var onOpenSettings: (() -> Void)?
     var onQuit: (() -> Void)?
     var onCheckForUpdates: (() -> Void)?
+    /// Flip the per-app rule for the app the user came from.
+    var onToggleCurrentApp: (() -> Void)?
+
+    /// The app the user is typing in and whether the per-app rules allow
+    /// composition there. Drives the badge (E while paused) and the
+    /// popover's "Vietnamese in <app>" row.
+    private var currentApp: (id: String, name: String)?
+    private var appAllowed = true
 
     init(engine: TelexEngine) {
         self.engine = engine
@@ -45,20 +53,41 @@ final class StatusBarController {
             onCheckForUpdates: { [weak self] in
                 self?.closePopover()
                 self?.onCheckForUpdates?()
-            }
+            },
+            onToggleCurrentApp: { [weak self] in self?.onToggleCurrentApp?() }
         )
         popover.contentViewController = NSHostingController(rootView: rootView)
         popover.contentSize = NSSize(width: 280, height: 340)
         self.popover = popover
     }
 
+    /// Record the frontmost app and whether the per-app rules allow
+    /// composition in it; the popover follows through a notification.
+    func setCurrentApp(id: String?, name: String?, allowed: Bool) {
+        currentApp = id.map { ($0, name ?? $0) }
+        appAllowed = allowed
+        var info: [String: Any] = ["allowed": allowed]
+        if let currentApp {
+            info["id"] = currentApp.id
+            info["name"] = currentApp.name
+        }
+        NotificationCenter.default.post(name: .novaKeyCurrentAppChanged, object: nil, userInfo: info)
+    }
+
+    /// Show V when Vietnamese is on and allowed in the frontmost app, E
+    /// otherwise. The tooltip names the app where NovaKey is paused.
     func updateIcon(isVietnamese: Bool) {
         guard let button = statusItem?.button else { return }
+        let showVietnamese = isVietnamese && appAllowed
         button.title = ""
-        button.image = StatusBarController.makeIcon(letter: isVietnamese ? "V" : "E",
-                                                   colored: isVietnamese)
-        button.image?.isTemplate = !isVietnamese // English = template (monochrome), VN = colored
-        button.toolTip = isVietnamese ? "NovaKey: Vietnamese (Telex)" : "NovaKey: English"
+        button.image = StatusBarController.makeIcon(letter: showVietnamese ? "V" : "E",
+                                                   colored: showVietnamese)
+        button.image?.isTemplate = !showVietnamese // English = template (monochrome), VN = colored
+        if isVietnamese && !appAllowed {
+            button.toolTip = "NovaKey: paused in \(currentApp?.name ?? "this app")"
+        } else {
+            button.toolTip = isVietnamese ? "NovaKey: Vietnamese (Telex)" : "NovaKey: English"
+        }
     }
 
     /// Render a small gradient V or grey E as an NSImage for the status bar.
@@ -140,8 +169,12 @@ struct MenuBarPopoverView: View {
     let onOpenSettings: () -> Void
     let onQuit: () -> Void
     let onCheckForUpdates: () -> Void
+    let onToggleCurrentApp: () -> Void
 
     @State private var isVietnamese: Bool = AppSettings.shared.isVietnameseMode
+    /// The app the user came from, and whether Vietnamese is allowed there.
+    @State private var currentAppName: String?
+    @State private var currentAppAllowed: Bool = true
     @State private var hotkeyText: String = HotkeyManager.currentDescription
     @State private var fnEnabled: Bool = AppSettings.shared.switchWithFnKey
 
@@ -161,7 +194,14 @@ struct MenuBarPopoverView: View {
             hotkeyText = HotkeyManager.currentDescription
             fnEnabled = AppSettings.shared.switchWithFnKey
         }
+        .onReceive(NotificationCenter.default.publisher(for: .novaKeyCurrentAppChanged)) { note in
+            currentAppName = note.userInfo?["name"] as? String
+            currentAppAllowed = note.userInfo?["allowed"] as? Bool ?? true
+        }
     }
+
+    /// What the badge shows: paused in the current app beats the V/E choice.
+    private var pausedHere: Bool { isVietnamese && !currentAppAllowed }
 
     private var header: some View {
         HStack(spacing: 10) {
@@ -171,10 +211,12 @@ struct MenuBarPopoverView: View {
                     .font(.system(size: 15, weight: .bold))
                     .foregroundStyle(.white)
                 HStack(spacing: 5) {
-                    GradientLetterBadge(letter: isVietnamese ? "V" : "E", size: 14)
-                    Text(isVietnamese ? "Tiếng Việt" : "English")
+                    GradientLetterBadge(letter: isVietnamese && !pausedHere ? "V" : "E", size: 14)
+                    Text(pausedHere ? "Paused in \(currentAppName ?? "this app")"
+                         : isVietnamese ? "Tiếng Việt" : "English")
                         .font(.system(size: 11))
                         .foregroundStyle(.white.opacity(0.65))
+                        .lineLimit(1)
                 }
             }
             Spacer()
@@ -215,6 +257,15 @@ struct MenuBarPopoverView: View {
                         .foregroundStyle(.white.opacity(0.4))
                 }
             ), action: {})
+
+            if let name = currentAppName {
+                MenuRow(title: "Vietnamese in \(name)", trailing: AnyView(
+                    Image(systemName: currentAppAllowed ? "checkmark" : "")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .frame(width: 14)
+                ), action: onToggleCurrentApp)
+            }
 
             Divider().background(Color.white.opacity(0.08)).padding(.vertical, 4)
 
@@ -266,3 +317,8 @@ struct MenuRow: View {
     }
 }
 
+extension Notification.Name {
+    /// The frontmost app changed, or the per-app rules for it did. userInfo:
+    /// `id`, `name` (absent when the app could not be identified), `allowed`.
+    static let novaKeyCurrentAppChanged = Notification.Name("NovaKeyCurrentAppChanged")
+}

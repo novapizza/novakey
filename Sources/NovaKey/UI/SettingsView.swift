@@ -55,6 +55,7 @@ struct SettingsView: View {
                     .padding(.top, 6)
                 inputMethodCard
                 abbreviationsCard
+                AppRulesCard()
                 generalCard
                 compatibilityCard
                 aboutCard

@@ -20,6 +20,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var settingsWindow: NSWindow?
     private var permissionsWindow: NSWindow?
     private var abbreviationWindow: NSWindow?
+
+    /// The app the user is typing in (bundle identifier + display name), for
+    /// the per-app rules. NovaKey's own windows keep the previous app's
+    /// rules in force, like the Windows tray.
+    private var currentApp: (id: String, name: String)?
     private let browserWatcher = BrowserWatcher()
 
     // MARK: - App Lifecycle
@@ -103,6 +108,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         statusBarController.onCheckForUpdates = {
             UpdaterController.shared.checkForUpdates()
         }
+        statusBarController.onToggleCurrentApp = { [weak self] in
+            guard let self, let app = self.currentApp else { return }
+            var rules = AppSettings.shared.appRules
+            rules.setEnabled(app.id, !rules.allows(app.id))
+            AppSettings.shared.appRules = rules
+            NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+        }
 
         // Track the frontmost app so the autocomplete guard is scoped to
         // browsers. Push the flag into the sender on every activation change.
@@ -118,14 +130,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // applicationDidBecomeActive is not a usable hook for this.
         browserWatcher.onActivate = { [weak self] app in
             guard let self else { return }
-            // Abbreviations never expand inside NovaKey's own windows (the
-            // editor's fields would expand what the user is defining).
-            self.eventTapManager?.abbreviations.suspended =
-                app?.processIdentifier == ProcessInfo.processInfo.processIdentifier
             self.eventTapManager?.resetSession()
+            self.noteFrontmostApp(app)
             self.eventTapManager?.checkHealth()
         }
         browserWatcher.start()
+        noteFrontmostApp(NSWorkspace.shared.frontmostApplication)
         eventTapManager.keySender.browserKind = browserWatcher.kind
         eventTapManager.keySender.reduceFlicker = browserWatcher.isFlickerProne
 
@@ -231,6 +241,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         eventTapManager.abbreviations.enabled = settings.abbreviationsEnabled
         engine.quickVietnamese = settings.quickVietnamese
         engine.deferredDiacritics = settings.deferredDiacritics
+        applyAppRules()
+    }
+
+    // MARK: - Per-app rules
+
+    /// Record the app that just came to the front. NovaKey itself (Settings,
+    /// the editor, the popover) is transient: abbreviations are suspended
+    /// there, but the previous app's rules stay in force so the popover's
+    /// "Vietnamese in <app>" row still names the app the user came from.
+    private func noteFrontmostApp(_ app: NSRunningApplication?) {
+        let isSelf = app?.processIdentifier == ProcessInfo.processInfo.processIdentifier
+        eventTapManager?.abbreviations.suspended = isSelf
+        if isSelf { return }
+        if let id = app?.bundleIdentifier {
+            currentApp = (id, app?.localizedName ?? id)
+        } else {
+            currentApp = nil
+        }
+        applyAppRules()
+    }
+
+    /// Re-evaluate the per-app rules for the current app and reflect the
+    /// result in the tap and the menu bar. Called on app switch and whenever
+    /// the rules are edited.
+    private func applyAppRules() {
+        guard eventTapManager != nil, statusBarController != nil else { return }
+        let allowed = AppSettings.shared.appRules.allows(currentApp?.id)
+        eventTapManager.appAllowed = allowed
+        statusBarController.setCurrentApp(
+            id: currentApp?.id, name: currentApp?.name, allowed: allowed)
+        statusBarController.updateIcon(isVietnamese: engine.isVietnameseMode)
     }
 
     private func showSettings() {
