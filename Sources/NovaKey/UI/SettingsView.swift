@@ -132,6 +132,8 @@ struct SettingsView: View {
                         do {
                             if v { try SMAppService.mainApp.register() }
                             else { try SMAppService.mainApp.unregister() }
+                            // An explicit choice: never re-register on launch.
+                            UserDefaults.standard.set(true, forKey: AppConstants.Defaults.launchAtLoginConfigured)
                         } catch {
                             launchAtLogin = !v
                         }

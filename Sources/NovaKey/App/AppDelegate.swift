@@ -261,10 +261,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Launch at Login
 
+    /// Register for launch at login once, on first run. Registering on every
+    /// launch would silently re-enable it after the user turned it off in
+    /// Settings; after the first run `SMAppService.mainApp.status` is the
+    /// source of truth and only the Settings toggle changes it.
     private func enableLaunchAtLogin() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: AppConstants.Defaults.launchAtLoginConfigured) else { return }
         do {
             try SMAppService.mainApp.register()
-            Log.info("Launch at login: enabled")
+            defaults.set(true, forKey: AppConstants.Defaults.launchAtLoginConfigured)
+            Log.info("Launch at login: enabled (first run)")
         } catch {
             Log.error("Launch at login failed: \(error.localizedDescription)")
         }

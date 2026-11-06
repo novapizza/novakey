@@ -887,6 +887,28 @@ test("QV: real uw double-w still reverts the u (tuww -> tuw)") {
     try expect(typeQuick("tuww", quick: true), "tuw")
 }
 
+// "gi" counts as an initial: giw -> giư (giữ, giữa, giường)
+test("QV: gi initial takes quick w (giw -> giư)") {
+    try expect(typeQuick("giw", quick: true), "gi\(uHorn)")
+    try expect(typeQuick("Giw", quick: true), "Gi\(uHorn)")
+    try expect(typeQuick("giw", quick: false), "giw")
+}
+
+test("QV: gi quick w composes words") {
+    try expect(typeQuick("giwx", quick: true), "gi\u{1EEF}")              // giữ
+    try expect(typeQuick("giwax", quick: true), "gi\u{1EEF}a")            // giữa
+    try expect(typeQuick("giwowngf", quick: true), "gi\u{01B0}\u{1EDD}ng") // giường
+    try expect(typeQuick("giwj", quick: true), "gi\u{1EF1}")              // giự
+}
+
+test("QV: gi quick w double-w escapes (giww -> giw)") {
+    try expect(typeQuick("giww", quick: true), "giw")
+}
+
+test("QV: toned gi does not take quick w (gisw != gíư)") {
+    try expectTrue(typeQuick("gisw", quick: true) != "g\u{00ED}\(uHorn)")
+}
+
 // ============================================================
 // "Huawei" fix: ưa + w reverts to literal "uaw" (both modes)
 // ============================================================

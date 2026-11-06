@@ -219,8 +219,10 @@ final class TelexEngine {
 
     /// Whether the buffer currently holds exactly one valid syllable-initial
     /// consonant cluster and no vowels yet -- the precondition for Quick
-    /// Vietnamese turning a following `w` into `ư`.
+    /// Vietnamese turning a following `w` into `ư`. "gi" also qualifies: its
+    /// 'i' is part of the initial, so "giw" -> "giư" (giữ, giữa, giường).
     private func isQuickInitial() -> Bool {
+        if buffer.text.lowercased() == "gi" { return true }
         guard buffer.vowelCount == 0, !buffer.isEmpty else { return false }
         switch buffer.text.lowercased() {
         case "b", "c", "d", "đ", "g", "h", "l", "m", "n", "r", "s", "t", "v", "x",

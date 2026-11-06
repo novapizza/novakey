@@ -14,6 +14,9 @@ enum AppConstants {
         static let fixBrowserAutocomplete = "NovaKey.fixBrowserAutocomplete"
         static let sendKeyStepByStep = "NovaKey.sendKeyStepByStep"
         static let launchAtLogin = "NovaKey.launchAtLogin"
+        /// Set once the first-run launch-at-login registration has happened,
+        /// so later launches respect the user's Settings choice.
+        static let launchAtLoginConfigured = "NovaKey.launchAtLoginConfigured"
         static let playSoundOnSwitch = "NovaKey.playSoundOnSwitch"
         static let switchWithFnKey = "NovaKey.switchWithFnKey"
         static let quickVietnamese = "NovaKey.quickVietnamese"
