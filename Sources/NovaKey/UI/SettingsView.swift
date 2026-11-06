@@ -37,6 +37,8 @@ struct SettingsView: View {
     @State private var switchWithFnKey: Bool = AppSettings.shared.switchWithFnKey
     @State private var quickVietnamese: Bool = AppSettings.shared.quickVietnamese
     @State private var deferredDiacritics: Bool = AppSettings.shared.deferredDiacritics
+    @State private var abbreviationsEnabled: Bool = AppSettings.shared.abbreviationsEnabled
+    @State private var abbreviationCount: Int = AbbreviationStore.shared.table.count
 
     /// Callback to toggle Vietnamese mode in the engine (wired from AppDelegate).
     var onToggleMode: ((Bool) -> Void)? = nil
@@ -52,6 +54,7 @@ struct SettingsView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.top, 6)
                 inputMethodCard
+                abbreviationsCard
                 generalCard
                 compatibilityCard
                 aboutCard
@@ -64,6 +67,38 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: .novaKeyModeChanged)) { note in
             if let v = note.userInfo?["isVietnamese"] as? Bool {
                 isVietnamese = v
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .novaKeyAbbreviationsChanged)) { _ in
+            abbreviationCount = AbbreviationStore.shared.table.count
+        }
+    }
+
+    private var abbreviationsCard: some View {
+        NovaCard(title: "ABBREVIATIONS") {
+            VStack(alignment: .leading, spacing: 4) {
+                row("Expand abbreviations", trailing: {
+                    NovaToggle(isOn: $abbreviationsEnabled)
+                        .onChange(of: abbreviationsEnabled) { _, v in
+                            AppSettings.shared.abbreviationsEnabled = v
+                            NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+                        }
+                })
+                Text("Type a short form, then Tab (btw → by the way). Works in both Vietnamese and English mode.")
+                    .font(.caption)
+                    .foregroundStyle(NovaTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 12) {
+                Button("Edit List…") {
+                    NotificationCenter.default.post(name: .novaKeyEditAbbreviationsRequested, object: nil)
+                }
+                Text(abbreviationCount == 0 ? "No abbreviations yet"
+                     : abbreviationCount == 1 ? "1 abbreviation"
+                     : "\(abbreviationCount) abbreviations")
+                    .font(.caption)
+                    .foregroundStyle(NovaTheme.textSecondary)
+                Spacer()
             }
         }
     }

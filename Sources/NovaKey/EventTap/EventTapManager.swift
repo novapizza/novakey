@@ -76,6 +76,25 @@ final class EventTapManager {
     /// Whether the Fn (Globe) key toggles Vietnamese/English mode.
     var switchWithFnKey: Bool = true
 
+    // MARK: Abbreviations
+
+    /// Word tracking and Tab expansion (Settings > Abbreviations). Its
+    /// `enabled` and `suspended` flags are set by the app delegate.
+    let abbreviations = AbbreviationCoordinator()
+
+    /// A NovaKey text box that takes keys literally -- no composition, no
+    /// abbreviations -- so the abbreviation editor stores exactly the keys the
+    /// user presses ("omw", not the "ơm" Telex would make of it).
+    var literalInput: Bool = false
+
+    /// Forget the composition in progress: the syllable buffer and the word
+    /// tracker. Called whenever the caret may have moved without us seeing
+    /// it (click, app switch, tap revival, mode toggle).
+    func resetSession() {
+        engine.resetSession()
+        abbreviations.reset()
+    }
+
     /// Tracks Fn-key press state so we only toggle on the down edge.
     private var fnKeyWasDown = false
 
@@ -207,7 +226,7 @@ final class EventTapManager {
     /// stale buffer would backspace over the wrong characters.
     func reenable() {
         guard let tap = eventTap else { return }
-        engine.resetSession()
+        resetSession()
         // A keyUp we were waiting to swallow may have been dropped while the tap
         // was off; clearing avoids eating an unrelated release later.
         suppressingHotkeyKeyUp = false
@@ -266,7 +285,7 @@ final class EventTapManager {
         Log.error("WATCHDOG: tap found DISABLED (frontmost: \(frontmost), secureInput: \(secureInput)) -- reviving")
 
         // Same stale-buffer reasoning as `reenable()`.
-        engine.resetSession()
+        resetSession()
         CGEvent.tapEnable(tap: tap, enable: true)
         watchdogRecoveryCount += 1
 
@@ -344,7 +363,7 @@ final class EventTapManager {
 
         // Mouse clicks reset the session
         if type == .leftMouseDown || type == .rightMouseDown {
-            engine.resetSession()
+            resetSession()
             // ⌃-click and friends are modified clicks, not a pending toggle.
             comboWatcher.keyPressed()
             return passThrough
@@ -442,6 +461,26 @@ final class EventTapManager {
         let hasCtrl = flags.contains(.maskControl)
         let hasOption = flags.contains(.maskAlternate)
 
+        // Typing into the literal text box (the abbreviation editor's key
+        // field): behave like a plain keyboard.
+        if literalInput {
+            return passThrough
+        }
+
+        // Tab after an abbreviation replaces it with its expansion, in either
+        // language. The Tab is consumed, so it does not also move the focus
+        // or trigger a shell's completion; a Tab that expands nothing passes
+        // through.
+        if keyCode == KeyCode.tab.rawValue, !hasCmd, !hasCtrl, !hasOption,
+           !flags.contains(.maskShift),
+           case .restore(let bs, let text)? = abbreviations.expandOnTab(
+               engine: engine, table: AbbreviationStore.shared.table) {
+            Log.verbose("ABBREVIATION: \(bs) backspaces + '\(text)'")
+            keySender.execute(result: .replace(backspaces: bs, text: text), proxy: proxy)
+            return nil
+        }
+        abbreviations.track(keyCode: keyCode, isShift: isShift, modified: hasCmd || hasCtrl || hasOption)
+
         let result = engine.processKey(
             keyCode: keyCode,
             isShift: isShift,
@@ -472,7 +511,7 @@ final class EventTapManager {
     /// Flip Vietnamese/English mode, reset the syllable buffer, and notify the UI.
     private func toggleMode() {
         engine.isVietnameseMode.toggle()
-        engine.resetSession()
+        resetSession()
         onModeChanged?(engine.isVietnameseMode)
     }
 

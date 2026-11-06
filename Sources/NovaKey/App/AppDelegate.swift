@@ -5,13 +5,21 @@ import Cocoa
 import ServiceManagement
 import SwiftUI
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+
+    /// The editor's key field may close with the focus still in it; make
+    /// sure the literal-input mode never outlives the window.
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === abbreviationWindow else { return }
+        eventTapManager?.literalInput = false
+    }
 
     private var engine: TelexEngine!
     private var eventTapManager: EventTapManager!
     private var statusBarController: StatusBarController!
     private var settingsWindow: NSWindow?
     private var permissionsWindow: NSWindow?
+    private var abbreviationWindow: NSWindow?
     private let browserWatcher = BrowserWatcher()
 
     // MARK: - App Lifecycle
@@ -29,6 +37,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine.quickVietnamese = AppSettings.shared.quickVietnamese
         engine.deferredDiacritics = AppSettings.shared.deferredDiacritics
         Log.info("Engine initialized, Vietnamese mode: \(engine.isVietnameseMode)")
+
+        // The abbreviation list (Settings > Abbreviations) lives in its own
+        // text file; read it once, the editor keeps it current from then on.
+        AbbreviationStore.shared.load()
+        Log.info("Abbreviations loaded: \(AbbreviationStore.shared.table.count)")
 
         // Initialize event tap
         guard let tapManager = EventTapManager(engine: engine) else {
@@ -65,6 +78,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.applySettings()
         }
 
+        // The abbreviation editor's key field takes keys literally while it
+        // has the focus (see EventTapManager.literalInput).
+        NotificationCenter.default.addObserver(
+            forName: .novaKeyLiteralInputChanged, object: nil, queue: .main
+        ) { [weak self] note in
+            self?.eventTapManager?.literalInput = note.userInfo?["active"] as? Bool ?? false
+        }
+        NotificationCenter.default.addObserver(
+            forName: .novaKeyEditAbbreviationsRequested, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.showAbbreviationEditor()
+        }
+
         // Set up status bar
         statusBarController = StatusBarController(engine: engine)
         statusBarController.setup()
@@ -90,9 +116,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // left, so drop it, and take the opportunity to verify the tap is still
         // alive. NovaKey is LSUIElement and never becomes active itself, so
         // applicationDidBecomeActive is not a usable hook for this.
-        browserWatcher.onActivate = { [weak self] _ in
+        browserWatcher.onActivate = { [weak self] app in
             guard let self else { return }
-            self.engine.resetSession()
+            // Abbreviations never expand inside NovaKey's own windows (the
+            // editor's fields would expand what the user is defining).
+            self.eventTapManager?.abbreviations.suspended =
+                app?.processIdentifier == ProcessInfo.processInfo.processIdentifier
+            self.eventTapManager?.resetSession()
             self.eventTapManager?.checkHealth()
         }
         browserWatcher.start()
@@ -198,6 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         eventTapManager.toggleHotkeyModifiers = CGEventFlags(rawValue: settings.toggleHotkeyModifiers)
         eventTapManager.toggleHotkeyModifierOnly = settings.toggleHotkeyModifierOnly
         eventTapManager.switchWithFnKey = settings.switchWithFnKey
+        eventTapManager.abbreviations.enabled = settings.abbreviationsEnabled
         engine.quickVietnamese = settings.quickVietnamese
         engine.deferredDiacritics = settings.deferredDiacritics
     }
@@ -213,7 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             if self.engine.isVietnameseMode != vietnamese {
                 self.engine.isVietnameseMode = vietnamese
-                self.engine.resetSession()
+                self.eventTapManager.resetSession()
                 AppSettings.shared.isVietnameseMode = vietnamese
                 self.statusBarController.updateIcon(isVietnamese: vietnamese)
                 NotificationCenter.default.post(
@@ -234,13 +265,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.isMovableByWindowBackground = true
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = NSColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1.0)
-        window.contentView = NSHostingView(rootView: settingsView)
+        let hosting = NSHostingView(rootView: settingsView)
+        window.contentView = hosting
+        // Size to the cards rather than a fixed height, so adding a section
+        // never clips the bottom of the pane.
+        window.setContentSize(hosting.fittingSize)
         window.center()
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
         self.settingsWindow = window
+    }
+
+    // MARK: - Abbreviation editor
+
+    private func showAbbreviationEditor() {
+        if let window = abbreviationWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Abbreviations"
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = NSColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1.0)
+        window.contentView = NSHostingView(rootView: AbbreviationEditorView())
+        window.minSize = NSSize(width: 440, height: 360)
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        self.abbreviationWindow = window
     }
 
     // MARK: - Sleep / Wake

@@ -60,6 +60,14 @@ final class AppSettings {
         set { defaults.set(newValue, forKey: AppConstants.Defaults.deferredDiacritics) }
     }
 
+    /// Whether abbreviations expand: a short form plus Tab becomes its full
+    /// text ("btw" -> "by the way") in both V and E mode. The list itself
+    /// lives in `AbbreviationStore`. Off by default.
+    var abbreviationsEnabled: Bool {
+        get { defaults.bool(forKey: AppConstants.Defaults.abbreviationsEnabled) }
+        set { defaults.set(newValue, forKey: AppConstants.Defaults.abbreviationsEnabled) }
+    }
+
     /// Hotkey keycode for toggling Vietnamese/English.
     ///
     /// Presence, not value, decides whether a keycode was ever recorded: the

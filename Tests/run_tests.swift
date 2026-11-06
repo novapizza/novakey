@@ -1093,6 +1093,538 @@ test("deferred off: regressions") {
 }
 
 // ============================================================
+// Abbreviations (gõ tắt): table, word tracker, engine expansion, file
+// ============================================================
+print("\n--- Abbreviations ---")
+
+func abbrevTable(_ entries: [(String, String)] = [
+    ("btw", "by the way"), ("omw", "on my way"), ("đc", "được"), ("ko", "không"),
+]) -> Abbreviations {
+    var t = Abbreviations()
+    for (k, e) in entries {
+        if let err = t.insert(k, e) {
+            fatalError("abbrevTable: could not insert \(k): \(err)")
+        }
+    }
+    return t
+}
+
+/// Type letters into the engine; "\u{8}" is Backspace, uppercase is Shift.
+func typeWord(_ engine: TelexEngine, _ s: String) {
+    for ch in s {
+        if ch == "\u{8}" {
+            _ = engine.processKey(keyCode: KeyCode.delete.rawValue)
+        } else {
+            _ = engine.processKey(keyCode: keyCodeFor(ch.lowercased().first!), isShift: ch.isUppercase)
+        }
+    }
+}
+
+func expandAfter(_ s: String, quick: Bool = false) -> EngineResult? {
+    let engine = TelexEngine()
+    engine.isVietnameseMode = true
+    engine.quickVietnamese = quick
+    typeWord(engine, s)
+    return engine.expandAbbreviation(abbrevTable())
+}
+
+// --- Table ---
+
+test("Abbrev: keys need 2–32 letters") {
+    try expect(Abbreviations.normalizeKey("btw"), "btw")
+    try expect(Abbreviations.normalizeKey("  nz "), "nz")
+    try expect(Abbreviations.normalizeKey("đc"), "đc")
+    try expectNil(Abbreviations.normalizeKey("b"))
+    try expectNil(Abbreviations.normalizeKey("b4"))
+    try expectNil(Abbreviations.normalizeKey("b t"))
+    try expectNil(Abbreviations.normalizeKey("a.b"))
+    try expectNil(Abbreviations.normalizeKey(String(repeating: "a", count: 33)))
+    try expectTrue(Abbreviations.normalizeKey(String(repeating: "a", count: 32)) != nil)
+}
+
+test("Abbrev: expansions are single-line and bounded") {
+    try expect(Abbreviations.normalizeExpansion(" by the way "), "by the way")
+    try expectNil(Abbreviations.normalizeExpansion(""))
+    try expectNil(Abbreviations.normalizeExpansion("   "))
+    try expectNil(Abbreviations.normalizeExpansion("a\tb"))
+    try expectNil(Abbreviations.normalizeExpansion("a\nb"))
+    try expectNil(Abbreviations.normalizeExpansion(String(repeating: "x", count: 501)))
+    try expectTrue(Abbreviations.normalizeExpansion("không 👍") != nil)
+}
+
+test("Abbrev: insert replaces case-insensitively") {
+    var t = abbrevTable([("btw", "by the way")])
+    try expectNil(t.insert("BTW", "between"))
+    try expect(t.count, 1)
+    try expect(t.get("btw"), "between")
+    try expectTrue(t.remove("Btw"))
+    try expectTrue(t.isEmpty)
+    try expectFalse(t.remove("btw"))
+}
+
+test("Abbrev: insert reports why it refused") {
+    var t = Abbreviations()
+    try expect(t.insert("b", "x"), .invalidKey)
+    try expect(t.insert("btw", " "), .invalidExpansion)
+}
+
+test("Abbrev: table is bounded") {
+    var t = Abbreviations()
+    func key(_ i: Int) -> String {
+        var s = ""; var n = i
+        for _ in 0..<3 { s.append(Character(UnicodeScalar(UInt8(97 + n % 26)))); n /= 26 }
+        return s
+    }
+    for i in 0..<Abbreviations.maxEntries { try expectNil(t.insert(key(i), "x")) }
+    try expect(t.insert(key(Abbreviations.maxEntries), "x"), .full)
+    // Replacing an existing entry is still allowed when full.
+    try expectNil(t.insert(key(0), "y"))
+}
+
+test("Abbrev: case follows typing") {
+    let t = abbrevTable([("btw", "by the way"), ("NZ", "New Zealand")])
+    try expect(t.expand("btw"), "by the way")
+    try expect(t.expand("Btw"), "By the way")
+    try expect(t.expand("BTW"), "BY THE WAY")
+    try expect(t.expand("bTw"), "by the way")
+    // Typed exactly as defined: the expansion as defined.
+    try expect(t.expand("NZ"), "New Zealand")
+    try expect(t.expand("nz"), "New Zealand")
+    try expect(t.expand("Nz"), "New Zealand")
+    try expectNil(t.expand("xyz"))
+}
+
+test("Abbrev: capitalizes a Vietnamese first letter") {
+    let t = abbrevTable([("dc", "được")])
+    try expect(t.expand("Dc"), "Được")
+    try expect(t.expand("DC"), "ĐƯỢC")
+}
+
+test("Abbrev: expandWord replaces the typed letters") {
+    let t = abbrevTable([("btw", "by the way")])
+    try expect(t.expandWord("btw"), .restore(backspaces: 3, text: "by the way"))
+    try expectNil(t.expandWord("bt"))
+}
+
+// --- File format ---
+
+test("Abbrev: file round-trips") {
+    let t = abbrevTable([("btw", "by the way"), ("NZ", "New Zealand"), ("ko", "không")])
+    try expect(Abbreviations.parse(t.serialize()), t)
+}
+
+test("Abbrev: parse skips comments and bad lines") {
+    let text = "\u{FEFF}# comment\n\nbtw\tby the way\r\nb\tbad key\nnotab\nok\t  \nnz\tNew Zealand\n"
+    let t = Abbreviations.parse(text)
+    try expect(t.count, 2)
+    try expect(t.get("btw"), "by the way")
+    try expect(t.get("nz"), "New Zealand")
+}
+
+test("Abbrev: a second tab invalidates the line") {
+    let t = Abbreviations.parse("ab\tone\ttwo\ncd\tfine\n")
+    try expectNil(t.get("ab"))
+    try expect(t.get("cd"), "fine")
+}
+
+test("Abbrev: store writes and reads the file") {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("novakey-tests-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("abbreviations.txt")
+    let t = abbrevTable()
+    try expectTrue(AbbreviationStore.write(t, to: url))
+    try expect(AbbreviationStore.read(from: url), t)
+    // Missing file, or no file at all: an empty table, never a crash.
+    try expect(AbbreviationStore.read(from: dir.appendingPathComponent("missing.txt")), Abbreviations())
+    try expect(AbbreviationStore.read(from: nil), Abbreviations())
+    try expectFalse(AbbreviationStore.write(t, to: nil))
+}
+
+// --- Word tracker ---
+
+test("Tracker: collects a clean word") {
+    var w = WordTracker()
+    for c in "btw" { w.letter(c) }
+    try expect(w.currentWord, "btw")
+    w.boundary()
+    try expectNil(w.currentWord)
+    try expectTrue(w.isClean)
+}
+
+test("Tracker: rejects a glued word") {
+    var w = WordTracker()
+    w.interrupt() // e.g. a digit or '.'
+    for c in "btw" { w.letter(c) }
+    try expectNil(w.currentWord)
+    try expectFalse(w.isClean)
+}
+
+test("Tracker: follows backspace") {
+    var w = WordTracker()
+    for c in "btx" { w.letter(c) }
+    w.backspace()
+    w.letter("w")
+    try expect(w.currentWord, "btw")
+    // Backspacing past the word's start loses track of it.
+    for _ in 0..<4 { w.backspace() }
+    w.letter("a")
+    try expectNil(w.currentWord)
+}
+
+test("Tracker: steps back over a space") {
+    var w = WordTracker()
+    for c in "btw" { w.letter(c) }
+    w.space()
+    w.backspace()
+    try expect(w.currentWord, "btw")
+    // Only the one Space: a second backspace edits the word.
+    w.backspace()
+    try expect(w.currentWord, "bt")
+}
+
+test("Tracker: does not step back past other boundaries") {
+    var w = WordTracker()
+    for c in "btw" { w.letter(c) }
+    w.boundary() // Enter, an arrow key, a click…
+    w.backspace()
+    try expectNil(w.currentWord)
+    try expectFalse(w.isClean)
+
+    // Two spaces: the first backspace removes the second space only.
+    var w2 = WordTracker()
+    for c in "btw" { w2.letter(c) }
+    w2.space()
+    w2.space()
+    w2.backspace()
+    try expectNil(w2.currentWord)
+    try expectFalse(w2.isClean)
+}
+
+test("Tracker: returns to the boundary after deleting an expansion") {
+    var w = WordTracker()
+    w.expanded("by the way")
+    // Glued to the expansion: cannot expand.
+    for c in "btw" { w.letter(c) }
+    try expectNil(w.currentWord)
+    // Delete the three letters and "by the way" (10 characters).
+    for _ in 0..<12 {
+        w.backspace()
+        try expectFalse(w.isClean)
+    }
+    w.backspace()
+    try expectTrue(w.isClean)
+    for c in "btw" { w.letter(c) }
+    try expect(w.currentWord, "btw")
+}
+
+test("Tracker: gives up on overlong words") {
+    var w = WordTracker()
+    for _ in 0...Abbreviations.maxKeyLength { w.letter("a") }
+    try expectNil(w.currentWord)
+}
+
+// --- Engine expansion (Vietnamese mode) ---
+
+test("Engine abbrev: plain word expands") {
+    try expect(expandAfter("btw"), .restore(backspaces: 3, text: "by the way"))
+    try expect(expandAfter("ko"), .restore(backspaces: 2, text: "không"))
+}
+
+test("Engine abbrev: case follows typing") {
+    try expect(expandAfter("Btw"), .restore(backspaces: 3, text: "By the way"))
+    try expect(expandAfter("BTW"), .restore(backspaces: 3, text: "BY THE WAY"))
+}
+
+test("Engine abbrev: raw keys match when Telex changed the screen") {
+    // "omw" composes to "ơm" (2 chars on screen) -- still the abbreviation.
+    try expect(expandAfter("omw"), .restore(backspaces: 2, text: "on my way"))
+}
+
+test("Engine abbrev: composed screen text matches") {
+    // "ddc" shows "đc", which is itself a key.
+    try expect(expandAfter("ddc"), .restore(backspaces: 2, text: "được"))
+}
+
+test("Engine abbrev: non-abbreviations are left alone") {
+    try expectNil(expandAfter("bt"))
+    try expectNil(expandAfter("btwx"))
+    try expectNil(expandAfter("vieetj"))
+    try expectNil(expandAfter(""))
+}
+
+test("Engine abbrev: raw keys are ignored after a mid-word backspace") {
+    // After a backspace into composed text the raw keys no longer describe
+    // the screen; only the screen text can match. "omw<BS>w" shows "ơw".
+    try expectNil(expandAfter("omw\u{8}w"))
+    // "btx<BS>w" shows "btw" -> still expands.
+    try expect(expandAfter("btx\u{8}w"), .restore(backspaces: 3, text: "by the way"))
+}
+
+test("Engine abbrev: raw keys survive fixing a typo before any composition") {
+    // "omq<BS>" deletes the q the screen shows, so the keys stay exact and
+    // "omw" (shown "ơm") still matches by its keys.
+    try expect(expandAfter("omq\u{8}w"), .restore(backspaces: 2, text: "on my way"))
+    try expect(expandAfter("o\u{8}omw"), .restore(backspaces: 2, text: "on my way"))
+}
+
+test("Engine abbrev: backspace over the space steps back into the word") {
+    let engine = TelexEngine()
+    engine.isVietnameseMode = true
+    typeWord(engine, "omw")
+    _ = engine.processKey(keyCode: KeyCode.space.rawValue)
+    _ = engine.processKey(keyCode: KeyCode.delete.rawValue)
+    try expect(engine.expandAbbreviation(abbrevTable()), .restore(backspaces: 2, text: "on my way"))
+}
+
+test("Engine abbrev: expansion forgets the word") {
+    let engine = TelexEngine()
+    engine.isVietnameseMode = true
+    typeWord(engine, "btw")
+    try expectTrue(engine.expandAbbreviation(abbrevTable()) != nil)
+    try expectTrue(engine.buffer.isEmpty)
+    // Backspace does not step back into the replaced word.
+    try expect(engine.processKey(keyCode: KeyCode.delete.rawValue), .passThrough)
+    try expectTrue(engine.buffer.isEmpty)
+}
+
+test("Engine abbrev: a miss leaves the engine untouched") {
+    let engine = TelexEngine()
+    engine.isVietnameseMode = true
+    typeWord(engine, "vieet")
+    try expectNil(engine.expandAbbreviation(abbrevTable()))
+    try expect(engine.buffer.text, "viêt")
+}
+
+// --- The exact-raw backspace path must not change composition ---
+
+test("Backspace keeps raw keys exact only while screen == keys") {
+    // "tie" + BS + "eengs": the raw keys stay exact through the backspace,
+    // and the rest of the word composes as if the typo never happened.
+    let engine = TelexEngine()
+    engine.isVietnameseMode = true
+    typeWord(engine, "tie\u{8}eengs")
+    try expect(engine.buffer.text, "ti\u{1EBF}ng") // tiếng
+    // After a backspace into composed text the raw keys are abandoned, so an
+    // invalid syllable at the word break is NOT restored to stale keys.
+    let e2 = TelexEngine()
+    e2.isVietnameseMode = true
+    typeWord(e2, "tieeng\u{8}")
+    try expect(e2.buffer.text, "ti\u{00EA}n")
+    try expect(e2.processKey(keyCode: KeyCode.space.rawValue), .wordBreak)
+}
+
+
+// --- Coordinator: what the event tap does on every key and on Tab ---
+
+/// A tiny model of the tap: feeds keys through the coordinator and the engine
+/// exactly as EventTapManager does, applying results to a visible string.
+final class TapSim {
+    let engine = TelexEngine()
+    let coord = AbbreviationCoordinator()
+    let table: Abbreviations
+    var visible: [Character] = []
+    /// Whether the last Tab was swallowed (expanded) rather than passed on.
+    var lastTabSwallowed = false
+
+    init(vietnamese: Bool, table: Abbreviations = abbrevTable()) {
+        self.table = table
+        engine.isVietnameseMode = vietnamese
+        coord.enabled = true
+    }
+
+    func key(_ code: UInt16, shift: Bool = false, modified: Bool = false) {
+        if code == KeyCode.tab.rawValue, !modified, !shift,
+           case .restore(let bs, let text)? = coord.expandOnTab(engine: engine, table: table) {
+            visible.removeLast(min(bs, visible.count))
+            visible.append(contentsOf: text)
+            lastTabSwallowed = true
+            return
+        }
+        lastTabSwallowed = false
+        coord.track(keyCode: code, isShift: shift, modified: modified)
+        let result = engine.processKey(keyCode: code, isShift: shift, hasCommandOrControl: modified)
+        apply(result, code: code, shift: shift, modified: modified)
+    }
+
+    private func apply(_ result: EngineResult, code: UInt16, shift: Bool, modified: Bool) {
+        let typed: Character? = {
+            // A shortcut (⌘V, ⌃L…) types nothing by itself.
+            if modified { return nil }
+            if let k = KeyCode(rawValue: code), let l = k.asciiLetter {
+                return shift ? Character(l.uppercased()) : l
+            }
+            switch code {
+            case KeyCode.space.rawValue: return " "
+            case KeyCode.tab.rawValue: return "\t"
+            case KeyCode.returnKey.rawValue: return "\n"
+            case KeyCode.period.rawValue: return "."
+            case KeyCode.two.rawValue: return "2"
+            default: return nil
+            }
+        }()
+        switch result {
+        case .passThrough, .wordBreak:
+            if code == KeyCode.delete.rawValue {
+                if !visible.isEmpty { visible.removeLast() }
+            } else if let typed { visible.append(typed) }
+        case .replace(let bs, let text):
+            visible.removeLast(min(bs, visible.count))
+            visible.append(contentsOf: text)
+        case .restore(let bs, let text):
+            visible.removeLast(min(bs, visible.count))
+            visible.append(contentsOf: text)
+            if let typed { visible.append(typed) }
+        }
+    }
+
+    /// Type a string: letters (case = Shift), ' ' space, '\t' Tab, '\u{8}'
+    /// Backspace, '.' period, '2' digit.
+    func type(_ s: String) {
+        for ch in s {
+            switch ch {
+            case " ": key(KeyCode.space.rawValue)
+            case "\t": key(KeyCode.tab.rawValue)
+            case "\u{8}": key(KeyCode.delete.rawValue)
+            case ".": key(KeyCode.period.rawValue)
+            case "2": key(KeyCode.two.rawValue)
+            case "\n": key(KeyCode.returnKey.rawValue)
+            default: key(keyCodeFor(ch.lowercased().first!), shift: ch.isUppercase)
+            }
+        }
+    }
+
+    var text: String { String(visible) }
+}
+
+test("Coordinator: Tab expands in English mode and is swallowed") {
+    let sim = TapSim(vietnamese: false)
+    sim.type("btw\t")
+    try expect(sim.text, "by the way")
+    try expectTrue(sim.lastTabSwallowed)
+}
+
+test("Coordinator: Tab expands in Vietnamese mode (screen and raw keys)") {
+    let sim = TapSim(vietnamese: true)
+    sim.type("omw\t")
+    try expect(sim.text, "on my way")
+    let sim2 = TapSim(vietnamese: true)
+    sim2.type("ddc\t")
+    try expect(sim2.text, "được")
+}
+
+test("Coordinator: a Tab that expands nothing passes through") {
+    let sim = TapSim(vietnamese: false)
+    sim.type("hello\t")
+    try expect(sim.text, "hello\t")
+    try expectFalse(sim.lastTabSwallowed)
+}
+
+test("Coordinator: only after a clean boundary (x.btw, 2btw stay)") {
+    for vi in [false, true] {
+        let a = TapSim(vietnamese: vi)
+        a.type("x.btw\t")
+        try expect(a.text, "x.btw\t")
+        let b = TapSim(vietnamese: vi)
+        b.type("2btw\t")
+        try expect(b.text, "2btw\t")
+        let c = TapSim(vietnamese: vi)
+        c.type("hi btw\t")
+        try expect(c.text, "hi by the way")
+        let d = TapSim(vietnamese: vi)
+        d.type("hi\nbtw\t")
+        try expect(d.text, "hi\nby the way")
+    }
+}
+
+test("Coordinator: disabled or in own window never expands") {
+    let sim = TapSim(vietnamese: false)
+    sim.coord.enabled = false
+    sim.type("btw\t")
+    try expect(sim.text, "btw\t")
+    let own = TapSim(vietnamese: true)
+    own.coord.suspended = true
+    own.type("btw\t")
+    try expect(own.text, "btw\t")
+}
+
+test("Coordinator: case follows typing through the tap") {
+    let sim = TapSim(vietnamese: false)
+    sim.type("Btw\t BTW\t")
+    try expect(sim.text, "By the way BY THE WAY")
+}
+
+test("Coordinator: backspace over the space steps back into the word (E mode)") {
+    let sim = TapSim(vietnamese: false)
+    sim.type("btw \u{8}\t")
+    try expect(sim.text, "by the way")
+}
+
+test("Coordinator: fixing a typo keeps the word known") {
+    let e = TapSim(vietnamese: false)
+    e.type("btx\u{8}w\t")
+    try expect(e.text, "by the way")
+    let v = TapSim(vietnamese: true)
+    v.type("omq\u{8}w\t")
+    try expect(v.text, "on my way")
+}
+
+test("Coordinator: deleting an expansion returns to the boundary") {
+    let sim = TapSim(vietnamese: false)
+    sim.type("ko\t")
+    try expect(sim.text, "không")
+    // Letters glued to the expansion do not expand (the Tab passes through
+    // -- and, like any Tab, starts a fresh word, so test that separately).
+    let glued = TapSim(vietnamese: false)
+    glued.type("ko\tbtw\t")
+    try expect(glued.text, "khôngbtw\t")
+    // Delete the letters and the expansion: back at the boundary.
+    sim.type("btw")
+    try expect(sim.text, "khôngbtw")
+    sim.type(String(repeating: "\u{8}", count: 8))
+    try expect(sim.text, "")
+    sim.type("btw\t")
+    try expect(sim.text, "by the way")
+}
+
+test("Coordinator: a shortcut starts a fresh word, paste glues") {
+    let sim = TapSim(vietnamese: false)
+    sim.type("x")
+    sim.key(KeyCode.l.rawValue, modified: true) // ⌃L: clean prompt
+    sim.visible = []
+    sim.type("btw\t")
+    try expect(sim.text, "by the way")
+
+    let paste = TapSim(vietnamese: false)
+    paste.key(KeyCode.v.rawValue, modified: true) // ⌘V: unseen text before the caret
+    paste.type("btw\t")
+    try expect(paste.text, "btw\t")
+}
+
+test("Coordinator: reset (click / app switch) starts a clean word") {
+    let sim = TapSim(vietnamese: false)
+    sim.type("2x")
+    sim.coord.reset()
+    sim.engine.resetSession()
+    sim.type("btw\t")
+    try expect(sim.text, "2xby the way")
+}
+
+test("Coordinator: Shift-Tab and modified Tab are never expansion") {
+    let sim = TapSim(vietnamese: false)
+    sim.type("btw")
+    sim.key(KeyCode.tab.rawValue, shift: true)
+    try expectFalse(sim.lastTabSwallowed)
+}
+
+test("Coordinator: Vietnamese mode composes normally when no abbreviation") {
+    let sim = TapSim(vietnamese: true)
+    sim.type("tieengs vieetj ")
+    try expect(sim.text, "tiếng việt ")
+}
+
+
+// ============================================================
 // Toggle-shortcut Tests
 // ============================================================
 print("\n--- Toggle shortcut Tests ---")

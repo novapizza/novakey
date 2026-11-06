@@ -146,6 +146,21 @@ extension KeyCode {
         }
     }
 
+    /// Whether this key leaves the caret at the start of a fresh word (Space,
+    /// Enter, Tab, Escape, caret moves), as opposed to punctuation and forward
+    /// delete, which leave the caret glued to the text before it. An
+    /// abbreviation only expands when it was typed right after one of these.
+    var startsWord: Bool {
+        switch self {
+        case .space, .returnKey, .keypadEnter, .tab, .escape,
+             .leftArrow, .rightArrow, .upArrow, .downArrow,
+             .home, .end, .pageUp, .pageDown:
+            return true
+        default:
+            return false
+        }
+    }
+
     /// Whether this key is a modifier key.
     var isModifier: Bool {
         switch self {

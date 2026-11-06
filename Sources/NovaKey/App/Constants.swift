@@ -21,5 +21,6 @@ enum AppConstants {
         static let switchWithFnKey = "NovaKey.switchWithFnKey"
         static let quickVietnamese = "NovaKey.quickVietnamese"
         static let deferredDiacritics = "NovaKey.deferredDiacritics"
+        static let abbreviationsEnabled = "NovaKey.abbreviationsEnabled"
     }
 }
