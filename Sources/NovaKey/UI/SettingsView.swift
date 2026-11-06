@@ -1,34 +1,14 @@
 // SettingsView.swift
-// Dark, card-based SwiftUI preferences window for NovaKey.
+// Card-based SwiftUI preferences window for NovaKey, in the theme chosen
+// under Appearance (see NovaTheme.swift).
 
 import ServiceManagement
 import SwiftUI
 
-// MARK: - Design tokens
-
-enum NovaTheme {
-    static let windowBG = Color(red: 0.11, green: 0.11, blue: 0.12)
-    static let cardBG = Color(red: 0.16, green: 0.16, blue: 0.18)
-    static let cardStroke = Color.white.opacity(0.06)
-    static let sectionLabel = Color(red: 1.0, green: 0.72, blue: 0.27)
-    static let textPrimary = Color.white
-    static let textSecondary = Color.white.opacity(0.55)
-    static let pillOffBG = Color.white.opacity(0.08)
-    static let danger = Color(red: 1.0, green: 0.42, blue: 0.42)
-
-    static let brandGradient = LinearGradient(
-        colors: [
-            Color(red: 0.90, green: 0.15, blue: 0.20),
-            Color(red: 0.98, green: 0.43, blue: 0.16),
-            Color(red: 1.0, green: 0.78, blue: 0.28),
-        ],
-        startPoint: .leading, endPoint: .trailing
-    )
-}
-
 // MARK: - Main view
 
 struct SettingsView: View {
+    @Environment(\.novaTheme) private var theme
     @State private var isVietnamese: Bool = AppSettings.shared.isVietnameseMode
     @State private var launchAtLogin: Bool = (SMAppService.mainApp.status == .enabled)
     @State private var playSound: Bool = AppSettings.shared.playSoundOnSwitch
@@ -37,34 +17,41 @@ struct SettingsView: View {
     @State private var switchWithFnKey: Bool = AppSettings.shared.switchWithFnKey
     @State private var quickVietnamese: Bool = AppSettings.shared.quickVietnamese
     @State private var deferredDiacritics: Bool = AppSettings.shared.deferredDiacritics
+    @State private var abbreviationsEnabled: Bool = AppSettings.shared.abbreviationsEnabled
+    @State private var abbreviationCount: Int = AbbreviationStore.shared.table.count
+    @State private var settingsTheme: SettingsTheme = AppSettings.shared.settingsTheme
 
     /// Callback to toggle Vietnamese mode in the engine (wired from AppDelegate).
     var onToggleMode: ((Bool) -> Void)? = nil
 
     var body: some View {
         ZStack {
-            NovaTheme.windowBG.ignoresSafeArea()
+            theme.windowBG.ignoresSafeArea()
 
-            VStack(spacing: 14) {
-                Text("NovaKey Settings")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(NovaTheme.textPrimary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 6)
-                inputMethodCard
-                generalCard
-                compatibilityCard
-                aboutCard
+            ScrollView(.vertical) {
+                VStack(spacing: 14) {
+                    NovaHeader(title: "NovaKey Settings")
+                    inputMethodCard
+                    abbreviationsCard
+                    AppRulesCard()
+                    generalCard
+                    appearanceCard
+                    compatibilityCard
+                    aboutCard
+                }
+                .padding(.horizontal, 18)
+                .padding(.bottom, 18)
+                .padding(.top, 8)
             }
-            .padding(.horizontal, 18)
-            .padding(.bottom, 18)
-            .padding(.top, 8)
         }
         .frame(width: 480)
         .onReceive(NotificationCenter.default.publisher(for: .novaKeyModeChanged)) { note in
             if let v = note.userInfo?["isVietnamese"] as? Bool {
                 isVietnamese = v
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .novaKeyAbbreviationsChanged)) { _ in
+            abbreviationCount = AbbreviationStore.shared.table.count
         }
     }
 
@@ -80,14 +67,14 @@ struct SettingsView: View {
                 Spacer()
                 HotkeyRecorder()
             }
-            Divider().background(Color.white.opacity(0.06))
+            Divider().background(theme.divider)
             HStack {
                 Text("Input Method")
-                    .foregroundStyle(NovaTheme.textPrimary)
+                    .foregroundStyle(theme.textPrimary)
                 Spacer()
                 InputMethodMenu()
             }
-            Divider().background(Color.white.opacity(0.06))
+            Divider().background(theme.divider)
             VStack(alignment: .leading, spacing: 4) {
                 row("Quick Vietnamese", trailing: {
                     NovaToggle(isOn: $quickVietnamese)
@@ -96,10 +83,7 @@ struct SettingsView: View {
                             NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
                         }
                 })
-                Text("Type faster: a lone “w” after a consonant becomes “ư” (e.g. tw → tư). Mixed English words like “huawei” stay literal.")
-                    .font(.caption)
-                    .foregroundStyle(NovaTheme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                caption("Type faster: a lone “w” after a consonant becomes “ư” (e.g. tw → tư). Mixed English words like “huawei” stay literal.")
 
                 // Sub-option of Quick Vietnamese: indented, and greyed out /
                 // disabled while Quick Vietnamese is off.
@@ -111,15 +95,39 @@ struct SettingsView: View {
                                 NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
                             }
                     })
-                    Text("Add marks after the word: “did” → “đi”, “thana” → “thân”. Some English words that look Vietnamese may transform; press the key again to escape.")
-                        .font(.caption)
-                        .foregroundStyle(NovaTheme.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    caption("Add marks after the word: “did” → “đi”, “thana” → “thân”. Some English words that look Vietnamese may transform; press the key again to escape.")
                 }
                 .padding(.leading, 16)
                 .padding(.top, 6)
                 .disabled(!quickVietnamese)
                 .opacity(quickVietnamese ? 1 : 0.4)
+            }
+        }
+    }
+
+    private var abbreviationsCard: some View {
+        NovaCard(title: "ABBREVIATIONS") {
+            VStack(alignment: .leading, spacing: 4) {
+                row("Expand abbreviations", trailing: {
+                    NovaToggle(isOn: $abbreviationsEnabled)
+                        .onChange(of: abbreviationsEnabled) { _, v in
+                            AppSettings.shared.abbreviationsEnabled = v
+                            NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+                        }
+                })
+                caption("Type a short form, then Tab (btw → by the way). Works in both Vietnamese and English mode.")
+            }
+            HStack(spacing: 12) {
+                Button("Edit List…") {
+                    NotificationCenter.default.post(name: .novaKeyEditAbbreviationsRequested, object: nil)
+                }
+                .buttonStyle(NovaButtonStyle())
+                Text(abbreviationCount == 0 ? "No abbreviations yet"
+                     : abbreviationCount == 1 ? "1 abbreviation"
+                     : "\(abbreviationCount) abbreviations")
+                    .font(.caption)
+                    .foregroundStyle(theme.textSecondary)
+                Spacer()
             }
         }
     }
@@ -132,6 +140,8 @@ struct SettingsView: View {
                         do {
                             if v { try SMAppService.mainApp.register() }
                             else { try SMAppService.mainApp.unregister() }
+                            // An explicit choice: never re-register on launch.
+                            UserDefaults.standard.set(true, forKey: AppConstants.Defaults.launchAtLoginConfigured)
                         } catch {
                             launchAtLogin = !v
                         }
@@ -150,6 +160,26 @@ struct SettingsView: View {
                         NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
                     }
             })
+        }
+    }
+
+    private var appearanceCard: some View {
+        NovaCard(title: "APPEARANCE") {
+            VStack(alignment: .leading, spacing: 6) {
+                row("Theme", trailing: {
+                    NovaSegmented(
+                        options: SettingsTheme.allCases.map { (label: $0.title, value: $0) },
+                        selection: $settingsTheme
+                    )
+                    .onChange(of: settingsTheme) { _, v in
+                        AppSettings.shared.settingsTheme = v
+                        NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+                    }
+                })
+                caption(settingsTheme == .platinum
+                        ? "The gray, bevelled look of classic Mac OS for NovaKey's windows and menu."
+                        : "The dark look for NovaKey's windows and menu.")
+            }
         }
     }
 
@@ -177,10 +207,10 @@ struct SettingsView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("NovaKey v\(AppConstants.version)")
-                        .foregroundStyle(NovaTheme.textPrimary)
+                        .foregroundStyle(theme.textPrimary)
                     Text("Vietnamese Input Method for macOS")
                         .font(.caption)
-                        .foregroundStyle(NovaTheme.textSecondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
                 Spacer()
             }
@@ -192,10 +222,17 @@ struct SettingsView: View {
     @ViewBuilder
     private func row<Trailing: View>(_ title: String, @ViewBuilder trailing: () -> Trailing) -> some View {
         HStack {
-            Text(title).foregroundStyle(NovaTheme.textPrimary)
+            Text(title).foregroundStyle(theme.textPrimary)
             Spacer()
             trailing()
         }
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(theme.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func setMode(_ vietnamese: Bool) {
@@ -205,68 +242,55 @@ struct SettingsView: View {
     }
 }
 
-// MARK: - Card container
-
-struct NovaCard<Content: View>: View {
-    let title: String
-    @ViewBuilder let content: () -> Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .tracking(1.2)
-                .foregroundStyle(NovaTheme.sectionLabel)
-            content()
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(NovaTheme.cardBG)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(NovaTheme.cardStroke, lineWidth: 1)
-                )
-        )
-    }
-}
-
 // MARK: - Language pill (V / E selector)
 
+/// The V/E language button. A glowing gradient capsule in Modern; a
+/// bevelled push button, lit in the accent colour, in Platinum.
 struct LanguagePill: View {
+    @Environment(\.novaTheme) private var theme
     let label: String
     let letter: String
     let isActive: Bool
 
     var body: some View {
+        let textColor: Color = isActive ? .white : (theme.isRetro ? theme.textPrimary : theme.textSecondary)
         HStack(spacing: 8) {
             Text(letter)
                 .font(.system(size: 14, weight: .heavy, design: .rounded))
-                .foregroundStyle(isActive ? .white : NovaTheme.textSecondary)
+                .foregroundStyle(textColor)
             Text(label)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(isActive ? .white : NovaTheme.textSecondary)
+                .foregroundStyle(textColor)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 9)
+        .padding(.vertical, theme.isRetro ? 6 : 9)
         .background(
             Group {
-                if isActive {
-                    Capsule().fill(NovaTheme.brandGradient)
-                        .shadow(color: Color.red.opacity(0.45), radius: 10, y: 2)
+                if theme.isRetro {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isActive ? theme.accent : theme.pillOffBG)
+                        .overlay(
+                            Bevel(light: isActive ? Color.white.opacity(0.55) : theme.bevelLight,
+                                  shadow: isActive ? theme.bevelDark : theme.bevelShadow)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        )
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.black, lineWidth: 1))
+                } else if isActive {
+                    Capsule().fill(theme.accentGradient)
+                        .shadow(color: theme.accentGlow, radius: 10, y: 2)
                 } else {
-                    Capsule().fill(NovaTheme.pillOffBG)
+                    Capsule().fill(theme.pillOffBG)
                 }
             }
         )
-        .contentShape(Capsule())
+        .contentShape(Rectangle())
     }
 }
 
-// MARK: - Small gradient V/E badge (for popover header + status bar image)
+// MARK: - Small V/E badge (for popover header + status bar image)
 
 struct GradientLetterBadge: View {
+    @Environment(\.novaTheme) private var theme
     let letter: String
     var size: CGFloat = 22
     var body: some View {
@@ -274,8 +298,8 @@ struct GradientLetterBadge: View {
             .font(.system(size: size * 0.58, weight: .heavy, design: .rounded))
             .foregroundStyle(.white)
             .frame(width: size, height: size)
-            .background(Circle().fill(NovaTheme.brandGradient))
-            .shadow(color: Color.red.opacity(0.35), radius: 4, y: 1)
+            .background(Circle().fill(theme.accentGradient))
+            .shadow(color: theme.accentGlow.opacity(0.8), radius: 4, y: 1)
     }
 }
 
@@ -284,6 +308,7 @@ struct GradientLetterBadge: View {
 /// Shows the current toggle hotkey as key chips. Click to record a new one:
 /// press a modifier + key combination, or Escape to cancel.
 struct HotkeyRecorder: View {
+    @Environment(\.novaTheme) private var theme
     @State private var symbols: [String] = HotkeyManager.currentSymbols
     @State private var isRecording = false
     @State private var monitor: Any?
@@ -307,17 +332,10 @@ struct HotkeyRecorder: View {
                         if isRecording {
                             Text("Press keys…")
                                 .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                .foregroundStyle(NovaTheme.sectionLabel)
+                                .foregroundStyle(theme.isRetro ? theme.accent : theme.sectionLabel)
                                 .padding(.horizontal, 10)
                                 .frame(height: 26)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .fill(Color.white.opacity(0.09))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                                .stroke(NovaTheme.sectionLabel.opacity(0.7), lineWidth: 1)
-                                        )
-                                )
+                                .background(chip(highlighted: true))
                         } else {
                             HStack(spacing: 4) {
                                 ForEach(Array(symbols.enumerated()), id: \.offset) { _, s in
@@ -337,11 +355,8 @@ struct HotkeyRecorder: View {
                         Image(systemName: "arrow.uturn.backward")
                             .font(.system(size: 11, weight: .semibold))
                             .frame(width: 26, height: 26)
-                            .background(
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .fill(Color.white.opacity(0.09))
-                            )
-                            .foregroundStyle(NovaTheme.textSecondary)
+                            .background(chip(highlighted: false))
+                            .foregroundStyle(theme.textSecondary)
                     }
                     .buttonStyle(.plain)
                     .help("Restore the default shortcut (⌥Z)")
@@ -351,16 +366,27 @@ struct HotkeyRecorder: View {
             if let notice {
                 Text(notice.text)
                     .font(.caption)
-                    .foregroundStyle(notice.isError ? NovaTheme.danger : NovaTheme.sectionLabel)
+                    .foregroundStyle(notice.isError ? theme.danger : theme.sectionLabel)
                     .multilineTextAlignment(.trailing)
                     .fixedSize(horizontal: false, vertical: true)
             } else if isRecording {
                 Text("Press a combination, or just ⌃⇧. Esc to cancel.")
                     .font(.caption)
-                    .foregroundStyle(NovaTheme.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
             }
         }
         .onDisappear(perform: stop)
+    }
+
+    /// A key-cap chip: soft in Modern, a sunken white field in Platinum.
+    private func chip(highlighted: Bool) -> some View {
+        RoundedRectangle(cornerRadius: theme.controlRadius, style: .continuous)
+            .fill(theme.chipBG)
+            .overlay(
+                RoundedRectangle(cornerRadius: theme.controlRadius, style: .continuous)
+                    .stroke(theme.isRetro ? theme.bevelShadow
+                            : (highlighted ? theme.sectionLabel.opacity(0.7) : Color.clear), lineWidth: 1)
+            )
     }
 
     private func badgeKey(_ s: String) -> some View {
@@ -368,11 +394,8 @@ struct HotkeyRecorder: View {
             .font(.system(size: 12, weight: .semibold, design: .rounded))
             .frame(minWidth: 26, minHeight: 26)
             .padding(.horizontal, s.count > 1 ? 6 : 0)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Color.white.opacity(0.09))
-            )
-            .foregroundStyle(NovaTheme.textPrimary)
+            .background(chip(highlighted: false))
+            .foregroundStyle(theme.textPrimary)
     }
 
     private func toggleRecording() {
@@ -492,22 +515,27 @@ struct HotkeyRecorder: View {
 // MARK: - Input method menu (Telex only for now)
 
 struct InputMethodMenu: View {
+    @Environment(\.novaTheme) private var theme
     var body: some View {
         Menu {
             Button("Telex") {}
         } label: {
             HStack(spacing: 4) {
                 Text("Telex")
-                    .foregroundStyle(NovaTheme.textPrimary)
+                    .foregroundStyle(theme.textPrimary)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(NovaTheme.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.white.opacity(0.08))
+                RoundedRectangle(cornerRadius: theme.controlRadius + 1, style: .continuous)
+                    .fill(theme.isRetro ? theme.fieldBG : theme.pillOffBG)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: theme.controlRadius + 1, style: .continuous)
+                            .stroke(theme.isRetro ? Color.black : Color.clear, lineWidth: 1)
+                    )
             )
         }
         .menuStyle(.borderlessButton)
@@ -515,33 +543,11 @@ struct InputMethodMenu: View {
     }
 }
 
-// MARK: - Gradient toggle
-
-struct NovaToggle: View {
-    @Binding var isOn: Bool
-
-    var body: some View {
-        ZStack(alignment: isOn ? .trailing : .leading) {
-            Capsule()
-                .fill(isOn ? AnyShapeStyle(NovaTheme.brandGradient) : AnyShapeStyle(Color.white.opacity(0.12)))
-                .frame(width: 44, height: 24)
-            Circle()
-                .fill(Color.white)
-                .frame(width: 18, height: 18)
-                .padding(3)
-                .shadow(color: .black.opacity(0.25), radius: 1.5, y: 1)
-        }
-        .onTapGesture {
-            withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) { isOn.toggle() }
-        }
-        .contentShape(Capsule())
-    }
-}
-
 // MARK: - App logo
 
 /// Renders the AppLogo.png from the app bundle. Falls back to a gradient tile.
 struct AppLogoView: View {
+    @Environment(\.novaTheme) private var theme
     let size: CGFloat
     var cornerRadius: CGFloat = 8
 
@@ -552,7 +558,7 @@ struct AppLogoView: View {
                     .resizable()
                     .interpolation(.high)
             } else {
-                NovaTheme.brandGradient
+                theme.accentGradient
                     .overlay(
                         Image(systemName: "sparkle")
                             .font(.system(size: size * 0.5, weight: .bold))

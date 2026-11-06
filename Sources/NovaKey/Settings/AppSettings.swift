@@ -60,6 +60,28 @@ final class AppSettings {
         set { defaults.set(newValue, forKey: AppConstants.Defaults.deferredDiacritics) }
     }
 
+    /// Whether abbreviations expand: a short form plus Tab becomes its full
+    /// text ("btw" -> "by the way") in both V and E mode. The list itself
+    /// lives in `AbbreviationStore`. Off by default.
+    var abbreviationsEnabled: Bool {
+        get { defaults.bool(forKey: AppConstants.Defaults.abbreviationsEnabled) }
+        set { defaults.set(newValue, forKey: AppConstants.Defaults.abbreviationsEnabled) }
+    }
+
+    /// Per-app rules: where Vietnamese composition runs (Settings > Apps).
+    /// Defaults to every app.
+    var appRules: AppRules {
+        get { AppRules(dictionary: defaults.dictionary(forKey: AppConstants.Defaults.appRules)) }
+        set { defaults.set(newValue.dictionary, forKey: AppConstants.Defaults.appRules) }
+    }
+
+    /// The look of NovaKey's windows (Settings > Appearance). Modern by
+    /// default; an unknown stored value falls back to it.
+    var settingsTheme: SettingsTheme {
+        get { SettingsTheme(rawValue: defaults.integer(forKey: AppConstants.Defaults.settingsTheme)) ?? .modern }
+        set { defaults.set(newValue.rawValue, forKey: AppConstants.Defaults.settingsTheme) }
+    }
+
     /// Hotkey keycode for toggling Vietnamese/English.
     ///
     /// Presence, not value, decides whether a keycode was ever recorded: the

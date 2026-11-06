@@ -200,6 +200,26 @@ final class TelexEngine {
         return result
     }
 
+    /// Expand the word being composed if it is an abbreviation -- called by
+    /// the event tap when Tab ends a word, before `processKey`. Matches what
+    /// is on screen first ("đc"), then the raw keys behind it ("omw", which
+    /// Telex shows as "ơm"); the raw keys are skipped after a mid-word
+    /// backspace, when they no longer describe the screen. On a match the
+    /// word is forgotten (Backspace will not step back into it) and the
+    /// result is a `.restore`; the event tap consumes the Tab rather than
+    /// letting it through.
+    func expandAbbreviation(_ table: Abbreviations) -> EngineResult? {
+        guard !buffer.isEmpty else { return nil }
+        let screen = buffer.text
+        let text = table.expand(screen)
+            ?? (inlineGuardDisabled ? nil : table.expand(rawKeystrokes))
+        guard let text else { return nil }
+        let backspaces = screen.count
+        savedBuffer = nil
+        resetSession()
+        return .restore(backspaces: backspaces, text: text)
+    }
+
     /// Reset the syllable buffer and start fresh.
     func resetSession() {
         buffer.reset()
@@ -219,8 +239,10 @@ final class TelexEngine {
 
     /// Whether the buffer currently holds exactly one valid syllable-initial
     /// consonant cluster and no vowels yet -- the precondition for Quick
-    /// Vietnamese turning a following `w` into `ư`.
+    /// Vietnamese turning a following `w` into `ư`. "gi" also qualifies: its
+    /// 'i' is part of the initial, so "giw" -> "giư" (giữ, giữa, giường).
     private func isQuickInitial() -> Bool {
+        if buffer.text.lowercased() == "gi" { return true }
         guard buffer.vowelCount == 0, !buffer.isEmpty else { return false }
         switch buffer.text.lowercased() {
         case "b", "c", "d", "đ", "g", "h", "l", "m", "n", "r", "s", "t", "v", "x",
@@ -616,6 +638,15 @@ final class TelexEngine {
     // MARK: - Backspace Handling
 
     private func handleBackspace() -> EngineResult {
+        // While the screen still shows exactly the keys typed, Backspace
+        // deletes the last key, so the raw keystrokes stay exact -- and an
+        // abbreviation that Telex will change on screen ("omw" -> "ơm") can
+        // still be matched by its keys after a typo is fixed.
+        if !inlineGuardDisabled, buffer.text == rawKeystrokes {
+            buffer.removeLast()
+            _ = rawKeystrokes.popLast()
+            return .passThrough
+        }
         buffer.removeLast()
         // Once the user corrects mid-word, we cannot reliably reconstruct
         // the original raw keystrokes, so we disable the restore path -- and

@@ -5,13 +5,26 @@ import Cocoa
 import ServiceManagement
 import SwiftUI
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+
+    /// The editor's key field may close with the focus still in it; make
+    /// sure the literal-input mode never outlives the window.
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === abbreviationWindow else { return }
+        eventTapManager?.literalInput = false
+    }
 
     private var engine: TelexEngine!
     private var eventTapManager: EventTapManager!
     private var statusBarController: StatusBarController!
     private var settingsWindow: NSWindow?
     private var permissionsWindow: NSWindow?
+    private var abbreviationWindow: NSWindow?
+
+    /// The app the user is typing in (bundle identifier + display name), for
+    /// the per-app rules. NovaKey's own windows keep the previous app's
+    /// rules in force, like the Windows tray.
+    private var currentApp: (id: String, name: String)?
     private let browserWatcher = BrowserWatcher()
 
     // MARK: - App Lifecycle
@@ -29,6 +42,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine.quickVietnamese = AppSettings.shared.quickVietnamese
         engine.deferredDiacritics = AppSettings.shared.deferredDiacritics
         Log.info("Engine initialized, Vietnamese mode: \(engine.isVietnameseMode)")
+
+        // The abbreviation list (Settings > Abbreviations) lives in its own
+        // text file; read it once, the editor keeps it current from then on.
+        AbbreviationStore.shared.load()
+        Log.info("Abbreviations loaded: \(AbbreviationStore.shared.table.count)")
 
         // Initialize event tap
         guard let tapManager = EventTapManager(engine: engine) else {
@@ -63,6 +81,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: .novaKeySettingsChanged, object: nil, queue: .main
         ) { [weak self] _ in
             self?.applySettings()
+            self?.applyThemeToOpenWindows()
+        }
+
+        // The abbreviation editor's key field takes keys literally while it
+        // has the focus (see EventTapManager.literalInput).
+        NotificationCenter.default.addObserver(
+            forName: .novaKeyLiteralInputChanged, object: nil, queue: .main
+        ) { [weak self] note in
+            self?.eventTapManager?.literalInput = note.userInfo?["active"] as? Bool ?? false
+        }
+        NotificationCenter.default.addObserver(
+            forName: .novaKeyEditAbbreviationsRequested, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.showAbbreviationEditor()
         }
 
         // Set up status bar
@@ -77,6 +109,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController.onCheckForUpdates = {
             UpdaterController.shared.checkForUpdates()
         }
+        statusBarController.onToggleCurrentApp = { [weak self] in
+            guard let self, let app = self.currentApp else { return }
+            var rules = AppSettings.shared.appRules
+            rules.setEnabled(app.id, !rules.allows(app.id))
+            AppSettings.shared.appRules = rules
+            NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+        }
 
         // Track the frontmost app so the autocomplete guard is scoped to
         // browsers. Push the flag into the sender on every activation change.
@@ -90,12 +129,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // left, so drop it, and take the opportunity to verify the tap is still
         // alive. NovaKey is LSUIElement and never becomes active itself, so
         // applicationDidBecomeActive is not a usable hook for this.
-        browserWatcher.onActivate = { [weak self] _ in
+        browserWatcher.onActivate = { [weak self] app in
             guard let self else { return }
-            self.engine.resetSession()
+            self.eventTapManager?.resetSession()
+            self.noteFrontmostApp(app)
             self.eventTapManager?.checkHealth()
         }
         browserWatcher.start()
+        noteFrontmostApp(NSWorkspace.shared.frontmostApplication)
         eventTapManager.keySender.browserKind = browserWatcher.kind
         eventTapManager.keySender.reduceFlicker = browserWatcher.isFlickerProne
 
@@ -198,8 +239,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         eventTapManager.toggleHotkeyModifiers = CGEventFlags(rawValue: settings.toggleHotkeyModifiers)
         eventTapManager.toggleHotkeyModifierOnly = settings.toggleHotkeyModifierOnly
         eventTapManager.switchWithFnKey = settings.switchWithFnKey
+        eventTapManager.abbreviations.enabled = settings.abbreviationsEnabled
         engine.quickVietnamese = settings.quickVietnamese
         engine.deferredDiacritics = settings.deferredDiacritics
+        applyAppRules()
+    }
+
+    // MARK: - Per-app rules
+
+    /// Record the app that just came to the front. NovaKey itself (Settings,
+    /// the editor, the popover) is transient: abbreviations are suspended
+    /// there, but the previous app's rules stay in force so the popover's
+    /// "Vietnamese in <app>" row still names the app the user came from.
+    private func noteFrontmostApp(_ app: NSRunningApplication?) {
+        let isSelf = app?.processIdentifier == ProcessInfo.processInfo.processIdentifier
+        eventTapManager?.abbreviations.suspended = isSelf
+        if isSelf { return }
+        if let id = app?.bundleIdentifier {
+            currentApp = (id, app?.localizedName ?? id)
+        } else {
+            currentApp = nil
+        }
+        applyAppRules()
+    }
+
+    /// Re-evaluate the per-app rules for the current app and reflect the
+    /// result in the tap and the menu bar. Called on app switch and whenever
+    /// the rules are edited.
+    private func applyAppRules() {
+        guard eventTapManager != nil, statusBarController != nil else { return }
+        let allowed = AppSettings.shared.appRules.allows(currentApp?.id)
+        eventTapManager.appAllowed = allowed
+        statusBarController.setCurrentApp(
+            id: currentApp?.id, name: currentApp?.name, allowed: allowed)
+        statusBarController.updateIcon(isVietnamese: engine.isVietnameseMode)
     }
 
     private func showSettings() {
@@ -213,7 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             if self.engine.isVietnameseMode != vietnamese {
                 self.engine.isVietnameseMode = vietnamese
-                self.engine.resetSession()
+                self.eventTapManager.resetSession()
                 AppSettings.shared.isVietnameseMode = vietnamese
                 self.statusBarController.updateIcon(isVietnamese: vietnamese)
                 NotificationCenter.default.post(
@@ -232,15 +305,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
-        window.appearance = NSAppearance(named: .darkAqua)
-        window.backgroundColor = NSColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1.0)
-        window.contentView = NSHostingView(rootView: settingsView)
+        applyTheme(to: window)
+        let hosting = NSHostingView(rootView: ThemedRoot { settingsView })
+        window.contentView = hosting
+        // Size to the cards rather than a fixed height, so adding a section
+        // never clips the bottom of the pane -- capped to the screen, where
+        // the pane scrolls instead.
+        var size = hosting.fittingSize
+        if let screen = NSScreen.main {
+            size.height = min(size.height, screen.visibleFrame.height - 40)
+        }
+        window.setContentSize(size)
         window.center()
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
         self.settingsWindow = window
+    }
+
+    // MARK: - Appearance
+
+    /// The window frame follows the theme (Settings > Appearance): dark for
+    /// Modern, light gray for Platinum, so native controls match the content.
+    private func applyTheme(to window: NSWindow) {
+        let theme = NovaTheme.current()
+        window.appearance = NSAppearance(named: theme.appearance)
+        window.backgroundColor = theme.windowColor
+    }
+
+    /// Re-theme the open windows after the theme changed in Settings.
+    private func applyThemeToOpenWindows() {
+        for window in [settingsWindow, abbreviationWindow].compactMap({ $0 }) {
+            applyTheme(to: window)
+        }
+    }
+
+    // MARK: - Abbreviation editor
+
+    private func showAbbreviationEditor() {
+        if let window = abbreviationWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Abbreviations"
+        applyTheme(to: window)
+        window.contentView = NSHostingView(rootView: ThemedRoot { AbbreviationEditorView() })
+        window.minSize = NSSize(width: 440, height: 360)
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        self.abbreviationWindow = window
     }
 
     // MARK: - Sleep / Wake
@@ -261,10 +387,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Launch at Login
 
+    /// Register for launch at login once, on first run. Registering on every
+    /// launch would silently re-enable it after the user turned it off in
+    /// Settings; after the first run `SMAppService.mainApp.status` is the
+    /// source of truth and only the Settings toggle changes it.
     private func enableLaunchAtLogin() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: AppConstants.Defaults.launchAtLoginConfigured) else { return }
         do {
             try SMAppService.mainApp.register()
-            Log.info("Launch at login: enabled")
+            defaults.set(true, forKey: AppConstants.Defaults.launchAtLoginConfigured)
+            Log.info("Launch at login: enabled (first run)")
         } catch {
             Log.error("Launch at login failed: \(error.localizedDescription)")
         }
