@@ -13,7 +13,10 @@ Nhanh, nhẹ (228KB), tương thích với trình duyệt, terminal và mọi �
 - **Đặt dấu thông minh** -- theo quy tắc chính tả tiếng Việt hiện đại (ví dụ: `hoang` + `f` đặt dấu trên `a`, không phải `o`)
 - **Bảo vệ từ tiếng Anh** -- các biến đổi Telex chỉ áp dụng khi âm tiết hợp lệ về cấu trúc, nên `class`, `know`, `add` giữ nguyên thay vì bị biến thành tiếng Việt
 - **Nhấn đúp escape / gõ n+1** -- gõ một phím Telex hai lần sẽ tin tưởng lần nhấn thứ hai vô điều kiện, nên `disst` → `dist`, `noww` → `now`, `corrrection` → `correction`
-- **Gõ tiếng Việt nhanh (tùy chọn)** -- một chữ `w` đứng sau phụ âm đầu sẽ thành `ư` (ví dụ: `tw` → `tư`), có hoàn tác thời gian thực nên các từ tiếng Anh lẫn lộn như `huawei` vẫn giữ nguyên
+- **Gõ tiếng Việt nhanh (tùy chọn)** -- một chữ `w` đứng sau phụ âm đầu sẽ thành `ư` (ví dụ: `tw` → `tư`, `giw` → `giư`), có hoàn tác thời gian thực nên các từ tiếng Anh lẫn lộn như `huawei` vẫn giữ nguyên
+- **Gõ tắt** -- gõ dạng viết tắt rồi nhấn Tab để thay bằng cụm đầy đủ (`btw` → `by the way`), dùng được ở cả chế độ Việt và Anh
+- **Quy tắc theo ứng dụng** -- gõ tiếng Việt ở mọi ứng dụng, chỉ ở một số ứng dụng, hoặc trừ một số ứng dụng; tạm dừng ứng dụng hiện tại ngay từ thanh menu
+- **Giao diện Platinum** -- tùy chọn giao diện Mac OS cổ điển cho cửa sổ Cài đặt và menu trên thanh trạng thái
 - **Ứng dụng thanh menu** -- chạy dưới dạng biểu tượng trên thanh trạng thái (V/E), không hiện trên Dock
 - **Sửa lỗi autocomplete trình duyệt** -- dò vùng chọn của ô nhập đang focus để bù cho gợi ý nội tuyến ở thanh địa chỉ, tránh đếm sai số backspace
 - **Tự phục hồi sau sleep/wake** -- tự động khởi động lại event tap sau khi máy ngủ
@@ -88,10 +91,20 @@ Nhấn vào biểu tượng **V/E** trên thanh menu > **Settings** để cấu 
 - **Toggle hotkey** -- ghi lại phím tắt riêng để chuyển đổi Việt/Anh
 - **Quick Vietnamese** -- tắt mặc định; một chữ `w` sau phụ âm sẽ thành `ư` (ví dụ: `tw` → `tư`), trong khi từ lẫn lộn như `huawei` vẫn giữ nguyên
 
+**Abbreviations** (gõ tắt)
+- **Expand abbreviations** -- tắt mặc định; gõ dạng viết tắt rồi nhấn **Tab** để thay bằng cụm đầy đủ (`btw` → `by the way`). Dùng được ở cả chế độ V và E. Phím Tab bị "nuốt"; Tab sau chữ khác vẫn hoạt động bình thường. Từ viết tắt dài 2–32 chữ cái, không phân biệt hoa thường, và cụm thay thế theo cách bạn gõ (`Btw` → `By the way`, `BTW` → `BY THE WAY`). Ở chế độ V, một mục khớp với phím bạn gõ (`omw`, dù Telex hiện `ơm`) hoặc chữ đã ghép (`đc`). Chỉ thay khi gõ ngay sau dấu cách, Enter, Tab, cú nhấp chuột hoặc phím tắt, nên `x.btw` và `2btw` được giữ nguyên.
+- **Edit List…** -- mở trình soạn danh sách. Danh sách lưu ở `~/Library/Application Support/NovaKey/abbreviations.txt` (mỗi dòng một cặp `viết tắt<TAB>cụm đầy đủ`, cùng định dạng với bản Windows), bạn cũng có thể sửa tay; NovaKey đọc khi khởi động.
+
+**Apps**
+- **All apps / Only these / All except** -- nơi gõ tiếng Việt hoạt động. Thêm ứng dụng từ danh sách đang mở, hoặc mở menu trên thanh trạng thái khi đang ở ứng dụng đó và nhấn **Vietnamese in <ứng dụng>**. Ở nơi NovaKey tạm dừng, biểu tượng hiện **E** và tooltip ghi tên ứng dụng; lựa chọn V/E của bạn vẫn giữ nguyên cho các ứng dụng khác.
+
 **General**
 - **Launch at login** -- tự động khởi động NovaKey
 - **Play sound on switch** -- phát âm thanh khi chuyển chế độ
 - **Switch with Fn (Globe) key** -- bật mặc định; đồng bộ với nút chuyển ngôn ngữ của hệ thống
+
+**Appearance**
+- **Theme** -- **Modern** (giao diện tối dạng thẻ) hoặc **Platinum** (giao diện xám, nổi khối của Mac OS cổ điển) cho Cài đặt, trình soạn gõ tắt và menu trên thanh trạng thái.
 
 **Compatibility**
 - **Fix browser autocomplete** -- bật mặc định, giúp gõ tiếng Việt trên thanh địa chỉ Chrome/Safari

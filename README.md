@@ -13,7 +13,10 @@ Fast, lightweight (228KB), compatible with browsers, terminals, and all macOS ap
 - **Smart tone placement** -- modern Vietnamese orthographic rules (e.g., `hoang` + `f` places tone on `a`, not `o`)
 - **English-word protection** -- Telex transforms are gated on structural syllable validity, so `class`, `know`, and `add` stay literal instead of turning into Vietnamese
 - **Double-press escape / n+1 typing** -- typing a Telex key twice trusts the second press unconditionally, so `disst` → `dist`, `noww` → `now`, `corrrection` → `correction`
-- **Quick Vietnamese (opt-in)** -- a lone `w` after an initial consonant becomes `ư` (e.g. `tw` → `tư`), with real-time revert so mixed English words like `huawei` stay literal
+- **Quick Vietnamese (opt-in)** -- a lone `w` after an initial consonant becomes `ư` (e.g. `tw` → `tư`, `giw` → `giư`), with real-time revert so mixed English words like `huawei` stay literal
+- **Abbreviations (gõ tắt)** -- a short form plus Tab expands to its full text (`btw` → `by the way`), in both Vietnamese and English mode
+- **Per-app rules** -- run Vietnamese typing everywhere, only in chosen apps, or everywhere except some; pause the current app from the menu bar
+- **Platinum theme** -- an optional classic Mac OS look for Settings and the menu bar popover
 - **Menu bar app** -- runs as a status bar icon (V/E), no dock icon
 - **Browser autocomplete fix** -- probes the focused field's selection to compensate for inline URL-bar suggestions, avoiding backspace miscounts
 - **Sleep/wake recovery** -- automatically restarts event tap after system sleep
@@ -89,10 +92,20 @@ Click the **V/E** icon in the menu bar > **Settings** to configure:
 - **Toggle hotkey** -- record your own shortcut for Vietnamese/English switching
 - **Quick Vietnamese** -- off by default; a lone `w` after a consonant becomes `ư` (e.g. `tw` → `tư`), while mixed words like `huawei` stay literal
 
+**Abbreviations**
+- **Expand abbreviations** -- off by default; type a short form, then **Tab**, to replace it with its full text (`btw` → `by the way`). Works in both V and E mode. The Tab is consumed; a Tab after anything else works as usual. Abbreviations are 2–32 letters, matched in any case, and the expansion follows how you typed it (`Btw` → `By the way`, `BTW` → `BY THE WAY`). In V mode an entry matches either the keys you pressed (`omw`, even though Telex shows `ơm`) or the composed text (`đc`). It only expands right after a space, Enter, Tab, a click or a shortcut, so `x.btw` and `2btw` are left alone.
+- **Edit List…** -- opens the editor. The list is saved to `~/Library/Application Support/NovaKey/abbreviations.txt` (one `abbreviation<TAB>expansion` per line, the same format as the Windows app), which you can also edit by hand; NovaKey reads it at startup.
+
+**Apps**
+- **All apps / Only these / All except** -- where Vietnamese typing runs. Add apps from the list of open apps, or open the menu bar popover while in an app and click **Vietnamese in <app>**. Where NovaKey is paused the badge shows **E** and the tooltip names the app; your V/E choice is kept unchanged for the other apps.
+
 **General**
 - **Launch at login** -- start NovaKey automatically
 - **Play sound on switch** -- audible cue when toggling modes
 - **Switch with Fn (Globe) key** -- on by default; follow the system language switch
+
+**Appearance**
+- **Theme** -- **Modern** (the dark cards) or **Platinum** (the gray, bevelled look of classic Mac OS) for Settings, the abbreviation editor and the menu bar popover.
 
 **Compatibility**
 - **Fix browser autocomplete** -- on by default, helps with Chrome/Safari URL bars
