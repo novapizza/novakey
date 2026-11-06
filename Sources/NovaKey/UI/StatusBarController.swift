@@ -57,12 +57,20 @@ final class StatusBarController {
             },
             onToggleCurrentApp: { [weak self] in self?.onToggleCurrentApp?() }
         )
-        let host = NSHostingController(rootView: rootView)
+        let host = NSHostingController(rootView: ThemedRoot { rootView })
         // Size to the rows (the per-app row comes and goes) instead of a
         // fixed height that would clip the bottom.
         host.sizingOptions = .preferredContentSize
         popover.contentViewController = host
+        popover.appearance = NSAppearance(named: NovaTheme.current().appearance)
         self.popover = popover
+
+        // Follow a theme change made in Settings.
+        NotificationCenter.default.addObserver(
+            forName: .novaKeySettingsChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.popover?.appearance = NSAppearance(named: NovaTheme.current().appearance)
+        }
     }
 
     /// Record the frontmost app and whether the per-app rules allow
@@ -172,6 +180,7 @@ final class CurrentAppState: ObservableObject {
 }
 
 struct MenuBarPopoverView: View {
+    @Environment(\.novaTheme) private var theme
     let engine: TelexEngine
     @ObservedObject var currentApp: CurrentAppState
     let onToggleMode: () -> Void
@@ -188,10 +197,10 @@ struct MenuBarPopoverView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             pillSection
-            Divider().background(Color.white.opacity(0.08))
+            Divider().background(theme.divider)
             menuRows
         }
-        .background(Color(red: 0.13, green: 0.12, blue: 0.14))
+        .background(theme.popoverBG)
         .frame(width: 280)
         .onReceive(NotificationCenter.default.publisher(for: .novaKeyModeChanged)) { note in
             if let v = note.userInfo?["isVietnamese"] as? Bool { isVietnamese = v }
@@ -211,13 +220,13 @@ struct MenuBarPopoverView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("NovaKey")
                     .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                 HStack(spacing: 5) {
                     GradientLetterBadge(letter: isVietnamese && !pausedHere ? "V" : "E", size: 14)
                     Text(pausedHere ? "Paused in \(currentApp.name ?? "this app")"
                          : isVietnamese ? "Tiếng Việt" : "English")
                         .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.65))
+                        .foregroundStyle(theme.textSecondary)
                         .lineLimit(1)
                 }
             }
@@ -242,7 +251,7 @@ struct MenuBarPopoverView: View {
                 Text(fnEnabled ? "\(hotkeyText) or Fn to toggle" : "\(hotkeyText) to toggle")
                     .font(.system(size: 11))
             }
-            .foregroundStyle(.white.opacity(0.45))
+            .foregroundStyle(theme.textSecondary)
             .padding(.leading, 2)
         }
         .padding(.horizontal, 14)
@@ -253,10 +262,10 @@ struct MenuBarPopoverView: View {
         VStack(spacing: 0) {
             MenuRow(title: "Input Method", trailing: AnyView(
                 HStack(spacing: 4) {
-                    Text("Telex").font(.system(size: 12)).foregroundStyle(.white.opacity(0.5))
+                    Text("Telex").font(.system(size: 12)).foregroundStyle(theme.textSecondary)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.4))
+                        .foregroundStyle(theme.textSecondary)
                 }
             ), action: {})
 
@@ -264,17 +273,17 @@ struct MenuBarPopoverView: View {
                 MenuRow(title: "Vietnamese in \(name)", trailing: AnyView(
                     Image(systemName: currentApp.allowed ? "checkmark" : "")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(theme.textPrimary)
                         .frame(width: 14)
                 ), action: onToggleCurrentApp)
             }
 
-            Divider().background(Color.white.opacity(0.08)).padding(.vertical, 4)
+            Divider().background(theme.divider).padding(.vertical, 4)
 
             MenuRow(title: "Settings…", trailing: AnyView(
                 Image(systemName: "arrow.right")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.5))
+                    .foregroundStyle(theme.textSecondary)
             ), action: onOpenSettings)
 
             MenuRow(title: "About NovaKey", trailing: AnyView(EmptyView()), action: {})
@@ -282,12 +291,12 @@ struct MenuBarPopoverView: View {
             MenuRow(title: "Check for Updates…", trailing: AnyView(EmptyView()),
                     action: onCheckForUpdates)
 
-            Divider().background(Color.white.opacity(0.08)).padding(.vertical, 4)
+            Divider().background(theme.divider).padding(.vertical, 4)
 
             MenuRow(title: "Quit", trailing: AnyView(
                 Text("⇧Q")
                     .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.4))
+                    .foregroundStyle(theme.textSecondary)
             ), action: onQuit)
         }
         .padding(.vertical, 6)
@@ -297,6 +306,7 @@ struct MenuBarPopoverView: View {
 
 /// One row in the popover menu, with hover highlight.
 struct MenuRow: View {
+    @Environment(\.novaTheme) private var theme
     let title: String
     let trailing: AnyView
     let action: () -> Void
@@ -306,14 +316,15 @@ struct MenuRow: View {
         HStack(spacing: 8) {
             Text(title)
                 .font(.system(size: 13))
-                .foregroundStyle(.white)
+                .foregroundStyle(hovering && theme.isRetro ? .white : theme.textPrimary)
             Spacer()
             trailing
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
         .contentShape(Rectangle())
-        .background(hovering ? Color.white.opacity(0.06) : Color.clear)
+        // Platinum menus highlight the row in the accent with white text.
+        .background(hovering ? theme.hoverBG : Color.clear)
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)
     }

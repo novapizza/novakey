@@ -9,6 +9,7 @@
 import SwiftUI
 
 struct AbbreviationEditorView: View {
+    @Environment(\.novaTheme) private var theme
     @State private var table = AbbreviationStore.shared.table
     @State private var selectedKey: String?
     @State private var keyText = ""
@@ -22,24 +23,22 @@ struct AbbreviationEditorView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Type an abbreviation, then press Tab to replace it with its full text: “btw” → “by the way”. It works in both Vietnamese and English mode.")
                 .font(.caption)
-                .foregroundStyle(NovaTheme.textSecondary)
+                .foregroundStyle(theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             entryList
 
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Abbreviation").font(.caption).foregroundStyle(NovaTheme.textSecondary)
-                    TextField("btw", text: $keyText)
-                        .textFieldStyle(.roundedBorder)
+                    Text("Abbreviation").font(.caption).foregroundStyle(theme.textSecondary)
+                    NovaTextField(placeholder: "btw", text: $keyText)
                         .focused($focusedField, equals: .key)
                         .onSubmit { focusedField = .expansion }
                 }
                 .frame(width: 150)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Expands to").font(.caption).foregroundStyle(NovaTheme.textSecondary)
-                    TextField("by the way", text: $expansionText)
-                        .textFieldStyle(.roundedBorder)
+                    Text("Expands to").font(.caption).foregroundStyle(theme.textSecondary)
+                    NovaTextField(placeholder: "by the way", text: $expansionText)
                         .focused($focusedField, equals: .expansion)
                         .onSubmit(add)
                 }
@@ -48,19 +47,21 @@ struct AbbreviationEditorView: View {
             HStack {
                 Text(statusText)
                     .font(.caption)
-                    .foregroundStyle(status?.isError == true ? NovaTheme.danger : NovaTheme.textSecondary)
+                    .foregroundStyle(status?.isError == true ? theme.danger : theme.textSecondary)
                     .lineLimit(2)
                 Spacer()
                 Button("Remove", action: remove)
+                    .buttonStyle(NovaButtonStyle())
                     .disabled(selectedKey == nil)
                 Button(isReplacing ? "Replace" : "Add", action: add)
+                    .buttonStyle(NovaButtonStyle())
                     .keyboardShortcut(.defaultAction)
                     .disabled(keyText.trimmingCharacters(in: .whitespaces).isEmpty
                               || expansionText.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
         .padding(16)
-        .background(NovaTheme.windowBG)
+        .background(theme.windowBG)
         .onChange(of: focusedField) { _, field in
             // Only the key field is literal: the expansion is free text.
             NotificationCenter.default.post(
@@ -87,11 +88,18 @@ struct AbbreviationEditorView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
+                .foregroundStyle(theme.textPrimary)
                 .tag(entry.key)
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(theme.fieldBG)
         .frame(minHeight: 160)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: theme.isRetro ? 0 : 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: theme.isRetro ? 0 : 8, style: .continuous)
+                .stroke(theme.isRetro ? Color.black : Color.clear, lineWidth: 1)
+        )
         .onChange(of: selectedKey) { _, key in
             guard let key, let expansion = table.get(key) else { return }
             keyText = key

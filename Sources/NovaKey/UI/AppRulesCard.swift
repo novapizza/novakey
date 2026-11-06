@@ -7,6 +7,7 @@
 import SwiftUI
 
 struct AppRulesCard: View {
+    @Environment(\.novaTheme) private var theme
     @State private var rules: AppRules = AppSettings.shared.appRules
     /// Apps shown in the "Add App…" menu; refreshed when the menu opens.
     @State private var runningApps: [RunningApp] = []
@@ -19,18 +20,19 @@ struct AppRulesCard: View {
     var body: some View {
         NovaCard(title: "APPS") {
             VStack(alignment: .leading, spacing: 10) {
-                Picker("", selection: $rules.mode) {
-                    Text("All apps").tag(AppRuleMode.all)
-                    Text("Only these").tag(AppRuleMode.only)
-                    Text("All except").tag(AppRuleMode.except)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                NovaSegmented(
+                    options: [
+                        (label: "All apps", value: AppRuleMode.all),
+                        (label: "Only these", value: AppRuleMode.only),
+                        (label: "All except", value: AppRuleMode.except),
+                    ],
+                    selection: $rules.mode
+                )
                 .onChange(of: rules.mode) { _, _ in save() }
 
                 Text(hint)
                     .font(.caption)
-                    .foregroundStyle(NovaTheme.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 if rules.mode != .all {
@@ -48,7 +50,7 @@ struct AppRulesCard: View {
 
     private var hint: String {
         switch rules.mode {
-        case .all: return "Vietnamese typing runs everywhere. Right-click the menu bar icon in any app to pause it there."
+        case .all: return "Vietnamese typing runs everywhere. Open the menu bar icon in any app to pause it there."
         case .only: return "Vietnamese typing runs only in the apps below; everywhere else NovaKey stays in English."
         case .except: return "Vietnamese typing runs everywhere except the apps below."
         }
@@ -60,7 +62,7 @@ struct AppRulesCard: View {
                 Text(rules.mode == .only ? "No apps yet — Vietnamese is off everywhere."
                      : "No apps yet — nothing is paused.")
                     .font(.caption)
-                    .foregroundStyle(NovaTheme.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 8)
                     .padding(.horizontal, 10)
@@ -68,11 +70,11 @@ struct AppRulesCard: View {
             ForEach(rules.activeList, id: \.self) { id in
                 HStack(spacing: 8) {
                     Text(Self.displayName(for: id))
-                        .foregroundStyle(NovaTheme.textPrimary)
+                        .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
                     Text(id)
                         .font(.caption)
-                        .foregroundStyle(NovaTheme.textSecondary)
+                        .foregroundStyle(theme.textSecondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer()
@@ -81,7 +83,7 @@ struct AppRulesCard: View {
                         save()
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(NovaTheme.textSecondary)
+                            .foregroundStyle(theme.textSecondary)
                     }
                     .buttonStyle(.plain)
                     .help("Remove")
@@ -89,13 +91,17 @@ struct AppRulesCard: View {
                 .padding(.vertical, 6)
                 .padding(.horizontal, 10)
                 if id != rules.activeList.last {
-                    Divider().background(Color.white.opacity(0.06))
+                    Divider().background(theme.divider)
                 }
             }
         }
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.white.opacity(0.05))
+            RoundedRectangle(cornerRadius: theme.isRetro ? 0 : 8, style: .continuous)
+                .fill(theme.fieldBG)
+                .overlay(
+                    RoundedRectangle(cornerRadius: theme.isRetro ? 0 : 8, style: .continuous)
+                        .stroke(theme.isRetro ? Color.black : Color.clear, lineWidth: 1)
+                )
         )
     }
 
@@ -115,6 +121,7 @@ struct AppRulesCard: View {
                 }
             } label: {
                 Label("Add App…", systemImage: "plus")
+                    .foregroundStyle(theme.textPrimary)
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
@@ -125,9 +132,9 @@ struct AppRulesCard: View {
             .onAppear { runningApps = Self.listRunningApps() }
             Text(rules.activeList.count == AppRules.maxApps
                  ? "List is full (\(AppRules.maxApps))."
-                 : "Or right-click the menu bar icon while in the app.")
+                 : "Or open the menu bar icon while in the app.")
                 .font(.caption)
-                .foregroundStyle(NovaTheme.textSecondary)
+                .foregroundStyle(theme.textSecondary)
             Spacer()
         }
     }

@@ -81,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             forName: .novaKeySettingsChanged, object: nil, queue: .main
         ) { [weak self] _ in
             self?.applySettings()
+            self?.applyThemeToOpenWindows()
         }
 
         // The abbreviation editor's key field takes keys literally while it
@@ -304,9 +305,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
-        window.appearance = NSAppearance(named: .darkAqua)
-        window.backgroundColor = NSColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1.0)
-        let hosting = NSHostingView(rootView: settingsView)
+        applyTheme(to: window)
+        let hosting = NSHostingView(rootView: ThemedRoot { settingsView })
         window.contentView = hosting
         // Size to the cards rather than a fixed height, so adding a section
         // never clips the bottom of the pane -- capped to the screen, where
@@ -322,6 +322,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
 
         self.settingsWindow = window
+    }
+
+    // MARK: - Appearance
+
+    /// The window frame follows the theme (Settings > Appearance): dark for
+    /// Modern, light gray for Platinum, so native controls match the content.
+    private func applyTheme(to window: NSWindow) {
+        let theme = NovaTheme.current()
+        window.appearance = NSAppearance(named: theme.appearance)
+        window.backgroundColor = theme.windowColor
+    }
+
+    /// Re-theme the open windows after the theme changed in Settings.
+    private func applyThemeToOpenWindows() {
+        for window in [settingsWindow, abbreviationWindow].compactMap({ $0 }) {
+            applyTheme(to: window)
+        }
     }
 
     // MARK: - Abbreviation editor
@@ -340,9 +357,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defer: false
         )
         window.title = "Abbreviations"
-        window.appearance = NSAppearance(named: .darkAqua)
-        window.backgroundColor = NSColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1.0)
-        window.contentView = NSHostingView(rootView: AbbreviationEditorView())
+        applyTheme(to: window)
+        window.contentView = NSHostingView(rootView: ThemedRoot { AbbreviationEditorView() })
         window.minSize = NSSize(width: 440, height: 360)
         window.center()
         window.isReleasedWhenClosed = false

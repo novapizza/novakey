@@ -23,5 +23,6 @@ enum AppConstants {
         static let deferredDiacritics = "NovaKey.deferredDiacritics"
         static let abbreviationsEnabled = "NovaKey.abbreviationsEnabled"
         static let appRules = "NovaKey.appRules"
+        static let settingsTheme = "NovaKey.settingsTheme"
     }
 }

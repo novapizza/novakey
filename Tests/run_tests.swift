@@ -1740,6 +1740,24 @@ test("AppRules: AppSettings persists the rules") {
 
 
 // ============================================================
+// Appearance (Settings > Appearance)
+// ============================================================
+print("\n--- Appearance ---")
+
+test("Theme: defaults to Modern and persists; garbage falls back") {
+    let settings = AppSettings.shared
+    let old = settings.settingsTheme
+    defer { settings.settingsTheme = old }
+    UserDefaults.standard.removeObject(forKey: AppConstants.Defaults.settingsTheme)
+    try expect(settings.settingsTheme, .modern)
+    settings.settingsTheme = .platinum
+    try expect(settings.settingsTheme, .platinum)
+    UserDefaults.standard.set(42, forKey: AppConstants.Defaults.settingsTheme)
+    try expect(settings.settingsTheme, .modern)
+    try expect(SettingsTheme.allCases.map(\.title), ["Modern", "Platinum"])
+}
+
+// ============================================================
 // Toggle-shortcut Tests
 // ============================================================
 print("\n--- Toggle shortcut Tests ---")

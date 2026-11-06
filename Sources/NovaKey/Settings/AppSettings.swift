@@ -75,6 +75,13 @@ final class AppSettings {
         set { defaults.set(newValue.dictionary, forKey: AppConstants.Defaults.appRules) }
     }
 
+    /// The look of NovaKey's windows (Settings > Appearance). Modern by
+    /// default; an unknown stored value falls back to it.
+    var settingsTheme: SettingsTheme {
+        get { SettingsTheme(rawValue: defaults.integer(forKey: AppConstants.Defaults.settingsTheme)) ?? .modern }
+        set { defaults.set(newValue.rawValue, forKey: AppConstants.Defaults.settingsTheme) }
+    }
+
     /// Hotkey keycode for toggling Vietnamese/English.
     ///
     /// Presence, not value, decides whether a keycode was ever recorded: the
