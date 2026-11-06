@@ -20,7 +20,7 @@ concurrency:
 jobs:
   # ── macOS: Developer ID sign + notarize + staple ──────────────────────────
   macos:
-    runs-on: macos-14
+    runs-on: macos-15
     environment: Production
     steps:
       - uses: actions/checkout@v4
