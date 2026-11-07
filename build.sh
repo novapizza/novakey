@@ -131,8 +131,24 @@ if [[ "${NOTARIZE:-0}" == "1" ]]; then
     echo "▶ Submitting to Apple notary (waits for result)..."
     xcrun notarytool submit "$ZIP" "${NOTARY_AUTH[@]}" --wait
 
+    # Right after "Accepted" the ticket may not have reached Apple's ticket
+    # CDN yet, and stapler fails with error 68 ("The network connection was
+    # lost") instead of waiting -- seen twice in a row on the v0.3.6 release
+    # run. Retry with a pause; a ticket that never arrives still fails the
+    # build, so an unstapled app is never shipped.
     echo "▶ Stapling ticket..."
-    xcrun stapler staple "$APP"
+    STAPLE_ATTEMPTS=6
+    for attempt in $(seq 1 "$STAPLE_ATTEMPTS"); do
+      if xcrun stapler staple "$APP"; then
+        break
+      fi
+      if [[ "$attempt" -eq "$STAPLE_ATTEMPTS" ]]; then
+        echo "✗ Stapling failed after $STAPLE_ATTEMPTS attempts." >&2
+        exit 1
+      fi
+      echo "  Staple attempt $attempt failed; retrying in 20s..."
+      sleep 20
+    done
     xcrun stapler validate "$APP"
     rm -f "$ZIP"
     echo "  Notarized + stapled"
