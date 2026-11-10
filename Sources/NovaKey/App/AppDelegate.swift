@@ -358,8 +358,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         window.title = "Abbreviations"
         applyTheme(to: window)
+        // The minimum size is set by AbbreviationEditorView's frame: the
+        // hosting view's constraints override NSWindow.minSize.
         window.contentView = NSHostingView(rootView: ThemedRoot { AbbreviationEditorView() })
-        window.minSize = NSSize(width: 440, height: 360)
         window.center()
         window.isReleasedWhenClosed = false
         window.delegate = self

@@ -61,6 +61,13 @@ struct AbbreviationEditorView: View {
             }
         }
         .padding(16)
+        // The window's minimum size comes from here: NSHostingView turns the
+        // SwiftUI minimum into window constraints (overriding
+        // NSWindow.minSize). Without a minimum width SwiftUI measures the
+        // wrapping caption at ~190pt wide, which makes the minimum height
+        // taller than the screen -- the window then can't shrink or show
+        // its bottom edge.
+        .frame(minWidth: 440, minHeight: 360)
         .background(theme.windowBG)
         .onChange(of: focusedField) { _, field in
             // Only the key field is literal: the expansion is free text.
