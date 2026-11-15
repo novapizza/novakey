@@ -207,26 +207,29 @@ struct PlatinumStripes: View {
 struct NovaHeader: View {
     @Environment(\.novaTheme) private var theme
     let title: String
+    /// Drawn in a window's transparent title bar: the stripes stop short of
+    /// the traffic-light buttons, as the classic close/zoom boxes did.
+    var inTitleBar: Bool = false
 
     var body: some View {
         if theme.isRetro {
             ZStack {
                 PlatinumStripes(light: theme.bevelLight, shadow: theme.bevelShadow)
-                    .frame(height: 20)
-                    .padding(.horizontal, 6)
+                    .frame(height: inTitleBar ? 14 : 20)
+                    .padding(.horizontal, inTitleBar ? 72 : 6)
                 Text(title)
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(theme.textPrimary)
                     .padding(.horizontal, 8)
                     .background(theme.windowBG)
             }
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(theme.textPrimary)
-                .frame(maxWidth: .infinity)
-                .padding(.top, 6)
+                .frame(maxWidth: .infinity, maxHeight: inTitleBar ? .infinity : nil)
+                .padding(.top, inTitleBar ? 0 : 6)
         }
     }
 }
@@ -360,10 +363,10 @@ struct NovaCard<Content: View>: View {
     var body: some View {
         if theme.isRetro {
             ZStack(alignment: .topLeading) {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 10) {
                     content()
                 }
-                .padding(16)
+                .padding(12)
                 .padding(.top, 6)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
@@ -382,14 +385,14 @@ struct NovaCard<Content: View>: View {
                     .padding(.top, 1)
             }
         } else {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
                 Text(title)
                     .font(.system(size: 11, weight: .semibold))
                     .tracking(1.2)
                     .foregroundStyle(theme.sectionLabel)
                 content()
             }
-            .padding(16)
+            .padding(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: theme.cardRadius, style: .continuous)

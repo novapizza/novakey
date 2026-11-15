@@ -307,11 +307,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isMovableByWindowBackground = true
         applyTheme(to: window)
         let hosting = NSHostingView(rootView: ThemedRoot { settingsView })
-        window.contentView = hosting
         // Size to the cards rather than a fixed height, so adding a section
         // never clips the bottom of the pane -- capped to the screen, where
-        // the pane scrolls instead.
+        // the pane scrolls instead. Measured before joining the window: once
+        // inside it, fittingSize adds the title bar inset, which the pane
+        // already draws under, and the window came out 32pt too tall.
         var size = hosting.fittingSize
+        window.contentView = hosting
         if let screen = NSScreen.main {
             size.height = min(size.height, screen.visibleFrame.height - 40)
         }

@@ -28,23 +28,36 @@ struct SettingsView: View {
         ZStack {
             theme.windowBG.ignoresSafeArea()
 
-            ScrollView(.vertical) {
-                VStack(spacing: 14) {
-                    NovaHeader(title: "NovaKey Settings")
-                    inputMethodCard
-                    abbreviationsCard
-                    AppRulesCard()
-                    generalCard
-                    appearanceCard
-                    compatibilityCard
-                    aboutCard
+            VStack(spacing: 0) {
+                // The header sits in the (transparent) title bar strip rather
+                // than taking a row of its own -- every point counts on a
+                // laptop screen, where an overflowing pane shows a scroller.
+                NovaHeader(title: "NovaKey Settings", inTitleBar: true)
+                    .frame(height: titleBarHeight)
+
+                // Sized to fit a laptop screen whole (the window is fitted to
+                // this content); the ScrollView only engages on a short
+                // screen or a long app list. Its scroller auto-hides when the
+                // content fits, so normally none shows -- as on Windows.
+                ScrollView(.vertical) {
+                    VStack(spacing: 8) {
+                        inputMethodCard
+                        abbreviationsCard
+                        AppRulesCard()
+                        generalCard
+                        footer
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+                    .padding(.top, 4)
                 }
-                .padding(.horizontal, 18)
-                .padding(.bottom, 18)
-                .padding(.top, 8)
+                .scrollBounceBehavior(.basedOnSize)
             }
         }
         .frame(width: 480)
+        // On the root, so the window's fitting size doesn't add the title
+        // bar inset on top of content that already draws under it.
+        .ignoresSafeArea(.container, edges: .top)
         .onReceive(NotificationCenter.default.publisher(for: .novaKeyModeChanged)) { note in
             if let v = note.userInfo?["isVietnamese"] as? Bool {
                 isVietnamese = v
@@ -108,28 +121,30 @@ struct SettingsView: View {
     private var abbreviationsCard: some View {
         NovaCard(title: "ABBREVIATIONS") {
             VStack(alignment: .leading, spacing: 4) {
+                // Edit List… shares the toggle's row (and the count moves into
+                // the caption) to keep the pane short enough for a laptop.
                 row("Expand abbreviations", trailing: {
-                    NovaToggle(isOn: $abbreviationsEnabled)
-                        .onChange(of: abbreviationsEnabled) { _, v in
-                            AppSettings.shared.abbreviationsEnabled = v
-                            NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+                    HStack(spacing: 12) {
+                        Button("Edit List…") {
+                            NotificationCenter.default.post(name: .novaKeyEditAbbreviationsRequested, object: nil)
                         }
+                        .buttonStyle(NovaButtonStyle())
+                        NovaToggle(isOn: $abbreviationsEnabled)
+                            .onChange(of: abbreviationsEnabled) { _, v in
+                                AppSettings.shared.abbreviationsEnabled = v
+                                NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+                            }
+                    }
                 })
-                caption("Type a short form, then Tab (btw → by the way). Works in both Vietnamese and English mode.")
-            }
-            HStack(spacing: 12) {
-                Button("Edit List…") {
-                    NotificationCenter.default.post(name: .novaKeyEditAbbreviationsRequested, object: nil)
-                }
-                .buttonStyle(NovaButtonStyle())
-                Text(abbreviationCount == 0 ? "No abbreviations yet"
-                     : abbreviationCount == 1 ? "1 abbreviation"
-                     : "\(abbreviationCount) abbreviations")
-                    .font(.caption)
-                    .foregroundStyle(theme.textSecondary)
-                Spacer()
+                caption("Type a short form, then Tab (btw → by the way), in either mode. \(abbreviationCountText).")
             }
         }
+    }
+
+    private var abbreviationCountText: String {
+        abbreviationCount == 0 ? "No abbreviations yet"
+            : abbreviationCount == 1 ? "1 abbreviation"
+            : "\(abbreviationCount) abbreviations"
     }
 
     private var generalCard: some View {
@@ -160,31 +175,19 @@ struct SettingsView: View {
                         NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
                     }
             })
-        }
-    }
-
-    private var appearanceCard: some View {
-        NovaCard(title: "APPEARANCE") {
-            VStack(alignment: .leading, spacing: 6) {
-                row("Theme", trailing: {
-                    NovaSegmented(
-                        options: SettingsTheme.allCases.map { (label: $0.title, value: $0) },
-                        selection: $settingsTheme
-                    )
-                    .onChange(of: settingsTheme) { _, v in
-                        AppSettings.shared.settingsTheme = v
-                        NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
-                    }
-                })
-                caption(settingsTheme == .platinum
-                        ? "The gray, bevelled look of classic Mac OS for NovaKey's windows and menu."
-                        : "The dark look for NovaKey's windows and menu.")
-            }
-        }
-    }
-
-    private var compatibilityCard: some View {
-        NovaCard(title: "COMPATIBILITY") {
+            // Appearance and compatibility used to be cards of their own; a
+            // row each keeps the pane short enough to fit a laptop screen.
+            row("Theme", trailing: {
+                NovaSegmented(
+                    options: SettingsTheme.allCases.map { (label: $0.title, value: $0) },
+                    selection: $settingsTheme
+                )
+                .onChange(of: settingsTheme) { _, v in
+                    AppSettings.shared.settingsTheme = v
+                    NotificationCenter.default.post(name: .novaKeySettingsChanged, object: nil)
+                }
+            })
+            Divider().background(theme.divider)
             row("Fix browser autocomplete", trailing: {
                 NovaToggle(isOn: $fixBrowserAutocomplete)
                     .onChange(of: fixBrowserAutocomplete) { _, v in
@@ -202,20 +205,16 @@ struct SettingsView: View {
         }
     }
 
-    private var aboutCard: some View {
-        NovaCard(title: "ABOUT") {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("NovaKey v\(AppConstants.version)")
-                        .foregroundStyle(theme.textPrimary)
-                    Text("Vietnamese Input Method for macOS")
-                        .font(.caption)
-                        .foregroundStyle(theme.textSecondary)
-                }
-                Spacer()
-            }
-        }
+    /// Version line under the cards (was an ABOUT card).
+    private var footer: some View {
+        Text("NovaKey v\(AppConstants.version) · Vietnamese Input Method for macOS")
+            .font(.caption)
+            .foregroundStyle(theme.textSecondary)
+            .frame(maxWidth: .infinity)
     }
+
+    /// Height of the transparent title bar strip the header sits in.
+    private let titleBarHeight: CGFloat = 32
 
     // MARK: Helpers
 
